@@ -1,121 +1,115 @@
 import numpy as np
 import pandas as pd
 
+
 def analyze_swing(df):
     """
-    Analyze golf swing from wrist tracking data.
-    
-    Args:
-        df: DataFrame with columns 'x', 'y', 'z', 'frame'
-        
-    Returns:
-        DataFrame with analysis results
+    Full swing analysis pipeline.
     """
-    
-    # Smooth wrist coordinates
-    df["wrist_x_smooth"] = df["x"].rolling(window=5, min_periods=1).mean()
-    df["wrist_y_smooth"] = df["y"].rolling(window=5, min_periods=1).mean()
-    df["wrist_z_smooth"] = df["z"].rolling(window=5, min_periods=1).mean()
-    
-    # Calculate wrist speed
-    df["wrist_velocity_y"] = df["wrist_y_smooth"].diff()
-    df["wrist_speed"] = df["wrist_velocity_y"].abs()
-    
-    # Find backswing peak (lowest Y point)
-    downswing_start = df["wrist_y_smooth"].idxmin()
-    
-    # Find impact (speed peak after backswing)
-    search_end = min(downswing_start + 20, len(df) - 1)
-    search_window = df.loc[downswing_start:search_end]
-    
-    if len(search_window) > 0:
-        impact_frame = search_window["wrist_speed"].idxmax()
+
+    # -----------------------------------
+    # 1. Smooth wrist coordinates
+    # -----------------------------------
+    df["wrist_x_smooth"] = df["wrist_x"].rolling(5, min_periods=1).mean()
+    df["wrist_y_smooth"] = df["wrist_y"].rolling(5, min_periods=1).mean()
+    df["wrist_z_smooth"] = df["wrist_z"].rolling(5, min_periods=1).mean()
+
+    y = df["wrist_y_smooth"].values
+
+    # -----------------------------------
+    # 2. Detect backswing start
+    #    First major drop in wrist height
+    # -----------------------------------
+    dy = np.diff(y)
+    drop_threshold = -0.015
+    drop_indices = np.where(dy < drop_threshold)[0]
+
+    backswing_start = drop_indices[0] if len(drop_indices) else 0
+
+    # -----------------------------------
+    # 3. Top of backswing (lowest Y after start)
+    # -----------------------------------
+    search_end = min(backswing_start + 80, len(df) - 1)
+    segment = y[backswing_start:search_end]
+    backswing_top = backswing_start + np.argmin(segment)
+
+    # -----------------------------------
+    # 4. Impact detection (highest velocity)
+    # -----------------------------------
+    vel = np.abs(np.diff(y))
+    impact_search_start = backswing_top
+    impact_search_end = min(impact_search_start + 40, len(vel) - 1)
+
+    if impact_search_end <= impact_search_start:
+        impact = backswing_top + 10
     else:
-        impact_frame = downswing_start + 10
-    
-    print(f"[INFO] Backswing peak: frame {downswing_start}")
-    print(f"[INFO] Impact: frame {impact_frame}")
-    
-    # Calculate swing path
+        local_vel = vel[impact_search_start:impact_search_end]
+        impact = impact_search_start + np.argmax(local_vel)
+
+    # Save indices
+    df["backswing_start_idx"] = backswing_start
+    df["backswing_top_idx"] = backswing_top
+    df["impact_idx"] = impact
+
+    # -----------------------------------
+    # 5. Swing Path (X vs Z)
+    # -----------------------------------
     try:
         from scipy.stats import linregress
-        
-        # Get sample points between backswing and impact
-        num_points = min(10, impact_frame - downswing_start)
-        
-        if num_points >= 3:
-            sample_frames = np.linspace(downswing_start, impact_frame, num_points, dtype=int)
-            
-            x_coords = df.loc[sample_frames, "wrist_x_smooth"].values
-            z_coords = df.loc[sample_frames, "wrist_z_smooth"].values
-            
-            # Remove NaN
-            valid_mask = ~(np.isnan(x_coords) | np.isnan(z_coords))
-            x_coords = x_coords[valid_mask]
-            z_coords = z_coords[valid_mask]
-            
-            if len(x_coords) >= 3:
-                # Simple angle
-                lateral = x_coords[-1] - x_coords[0]
-                forward = abs(z_coords[-1] - z_coords[0])
-                if forward < 0.001:
-                    forward = 0.001
-                raw_angle = np.degrees(np.arctan(lateral / forward))
-                
-                # Regression
-                slope, intercept, r_value, p_value, std_err = linregress(z_coords, x_coords)
-                regression_angle = np.degrees(np.arctan(slope))
-                path_quality = r_value ** 2
-                
-                # Average both methods
-                swing_angle = (raw_angle + regression_angle) / 2
-            else:
-                swing_angle = 0.0
-                path_quality = 0.0
+
+        sample_frames = np.linspace(backswing_top, impact, 10, dtype=int)
+
+        x_vals = df.loc[sample_frames, "wrist_x_smooth"].values
+        z_vals = df.loc[sample_frames, "wrist_z_smooth"].values
+
+        mask = ~(np.isnan(x_vals) | np.isnan(z_vals))
+        x_vals, z_vals = x_vals[mask], z_vals[mask]
+
+        if len(x_vals) >= 3:
+            slope, _, r_val, _, _ = linregress(z_vals, x_vals)
+            swing_angle = np.degrees(np.arctan(slope))
+            path_quality = r_val**2
         else:
             swing_angle = 0.0
             path_quality = 0.0
-            
-    except Exception as e:
-        print(f"[Warning] {e}")
+
+    except Exception:
         swing_angle = 0.0
         path_quality = 0.0
-    
-    # Classify swing path
+
+    # -----------------------------------
+    # 6. Ball flight classification
+    # -----------------------------------
     abs_angle = abs(swing_angle)
-    
+
     if abs_angle < 2:
         label = "Neutral / Straight"
         ball_flight = "Straight"
     elif abs_angle < 5:
-        if swing_angle > 0:
-            label = "Slight In-to-Out"
-            ball_flight = "Baby Draw"
-        else:
-            label = "Slight Out-to-In"
-            ball_flight = "Baby Fade"
+        label = "Slight In-to-Out" if swing_angle > 0 else "Slight Out-to-In"
+        ball_flight = "Baby Draw" if swing_angle > 0 else "Baby Fade"
     elif abs_angle < 8:
-        if swing_angle > 0:
-            label = "In-to-Out (Draw)"
-            ball_flight = "Draw"
-        else:
-            label = "Out-to-In (Fade)"
-            ball_flight = "Fade"
+        label = "In-to-Out (Draw)" if swing_angle > 0 else "Out-to-In (Fade)"
+        ball_flight = "Draw" if swing_angle > 0 else "Fade"
     else:
-        if swing_angle > 0:
-            label = "Strong In-to-Out (Hook)"
-            ball_flight = "Hook"
-        else:
-            label = "Strong Out-to-In (Slice)"
-            ball_flight = "Slice"
-    
-    # Store results
+        label = "Strong In-to-Out (Hook)" if swing_angle > 0 else "Strong Out-to-In (Slice)"
+        ball_flight = "Hook" if swing_angle > 0 else "Slice"
+
+    # -----------------------------------
+    # 7. Tempo calculation
+    # -----------------------------------
+    backswing_time = backswing_top - backswing_start
+    downswing_time = impact - backswing_top
+
+    tempo_ratio = round(backswing_time / downswing_time, 2) if downswing_time > 0 else 0.0
+
     df["swing_path_angle"] = swing_angle
     df["swing_path_label"] = label
     df["ball_flight"] = ball_flight
     df["path_quality"] = path_quality
-    
-    print(f"[INFO] Swing path: {label} ({swing_angle:.2f}°)")
-    print(f"[INFO] Quality R²: {path_quality:.3f}")
-    
+    df["tempo_ratio"] = tempo_ratio
+
+    df["backswing_frames"] = backswing_time
+    df["downswing_frames"] = downswing_time
+
     return df
