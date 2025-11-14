@@ -1,130 +1,138 @@
+"""
+Improved Swing Analysis - Accounts for Body Rotation
+Calculates swing path relative to shoulder line, not absolute coordinates
+"""
+
 import numpy as np
 import pandas as pd
+import math
 
 def analyze_swing(df):
     """
-    Analyze golf swing data using velocity-based phase detection.
+    Analyze golf swing using full body tracking.
+    Calculates swing path RELATIVE to body rotation for accuracy.
     
     Args:
-        df: DataFrame with columns 'x', 'y', 'z', 'frame' from pose_tracking
+        df: DataFrame with full body pose data
         
     Returns:
-        DataFrame with added analysis columns
+        DataFrame with analysis results
     """
     
-    # Check if we have the required columns
-    if 'x' not in df.columns or 'y' not in df.columns or 'z' not in df.columns:
-        raise ValueError(f"Missing required columns. Found columns: {df.columns.tolist()}")
+    print("\n[INFO] ===== FULL BODY SWING ANALYSIS =====")
+    
+    # Calculate shoulder line angle (body rotation)
+    df["shoulder_angle"] = df.apply(calculate_shoulder_angle, axis=1)
+    
+    # Calculate hip line angle (lower body rotation)
+    df["hip_angle"] = df.apply(calculate_hip_angle, axis=1)
+    
+    # Use lead wrist (left for right-handed golfer)
+    # TODO: Add handedness detection or let user specify
+    df["wrist_x"] = df["left_wrist_x"]
+    df["wrist_y"] = df["left_wrist_y"]
+    df["wrist_z"] = df["left_wrist_z"]
     
     # Smooth wrist coordinates
-    df["wrist_x_smooth"] = df["x"].rolling(window=5, min_periods=1).mean()
-    df["wrist_y_smooth"] = df["y"].rolling(window=5, min_periods=1).mean()
-    df["wrist_z_smooth"] = df["z"].rolling(window=5, min_periods=1).mean()
-
-    # Calculate wrist velocity (change in Y position)
+    df["wrist_x_smooth"] = df["wrist_x"].rolling(window=5, min_periods=1).mean()
+    df["wrist_y_smooth"] = df["wrist_y"].rolling(window=5, min_periods=1).mean()
+    df["wrist_z_smooth"] = df["wrist_z"].rolling(window=5, min_periods=1).mean()
+    
+    # Calculate wrist velocity and speed
     df["wrist_velocity_y"] = df["wrist_y_smooth"].diff()
-    
-    # Calculate wrist speed (absolute velocity)
     df["wrist_speed"] = df["wrist_velocity_y"].abs()
-
-    # ✅ IMPROVED: Find backswing peak using velocity change
-    # The top of backswing is where velocity changes from positive to negative
-    # (wrist stops going up and starts coming down)
     
-    # Find where velocity crosses from positive to negative
-    df["velocity_sign"] = np.sign(df["wrist_velocity_y"])
-    df["velocity_change"] = df["velocity_sign"].diff()
-    
-    # Backswing peak is where velocity_change is negative (going from up to down)
-    # Look in the first half of the video where backswing typically happens
-    search_region = df.iloc[10:len(df)//2]  # Skip first 10 frames, search first half
-    
-    # Find where wrist stops going up (velocity changes from + to -)
-    velocity_changes = search_region[search_region["velocity_change"] < 0]
-    
-    if len(velocity_changes) > 0:
-        # The first significant direction change is likely the top of backswing
-        downswing_start = velocity_changes.index[0]
-        print(f"[DEBUG] Found backswing peak at frame {downswing_start} using velocity change")
+    # ✅ STEP 1: Find IMPACT (biggest speed spike)
+    search_region = df.iloc[10:-10] if len(df) > 20 else df
+    if len(search_region) > 0 and "wrist_speed" in search_region.columns:
+        impact_frame = search_region["wrist_speed"].idxmax()
+        print(f"[DEBUG] Impact detected at frame {impact_frame}")
     else:
-        # Fallback: use highest point
-        downswing_start = df["wrist_y_smooth"].idxmax()
-        print(f"[DEBUG] Using highest point fallback at frame {downswing_start}")
+        impact_frame = len(df) // 2
+        print(f"[DEBUG] Using estimated impact at frame {impact_frame}")
     
-    # Find impact using speed peak after backswing
-    search_end = min(downswing_start + 20, len(df) - 1)
-    search_window = df.loc[downswing_start:search_end]
+    # ✅ STEP 2: Find BACKSWING PEAK (lowest wrist Y before impact)
+    backswing_search = df.iloc[10:impact_frame] if impact_frame > 10 else df.iloc[:impact_frame]
     
-    if len(search_window) > 0 and "wrist_speed" in search_window.columns:
-        impact_frame = search_window["wrist_speed"].idxmax()
-        if pd.isna(impact_frame):
-            impact_frame = downswing_start + 10
+    if len(backswing_search) > 5:
+        # Find lowest wrist point (top of backswing)
+        downswing_start = backswing_search["wrist_y_smooth"].idxmin()
+        print(f"[DEBUG] Backswing peak at frame {downswing_start}")
     else:
-        impact_frame = downswing_start + 10
+        downswing_start = max(0, impact_frame - 15)
+        print(f"[DEBUG] Using estimated backswing at frame {downswing_start}")
     
-    print(f"[DEBUG] Backswing peak (transition): frame {downswing_start}")
-    print(f"[DEBUG] Impact point: frame {impact_frame}")
-
-    # Calculate swing path
+    print(f"[DEBUG] Analysis window: frames {downswing_start} to {impact_frame}")
+    
+    # ✅ STEP 3: Calculate CORRECTED swing path (relative to body rotation)
     try:
         from scipy.stats import linregress
         
-        # Get sample points from downswing to impact
-        num_points = min(10, impact_frame - downswing_start)
-        if num_points >= 5:
+        # Get sample points between backswing and impact
+        num_frames = impact_frame - downswing_start
+        num_points = min(10, num_frames)
+        
+        if num_points >= 3:
             sample_frames = np.linspace(downswing_start, impact_frame, num_points, dtype=int)
             sample_frames = sample_frames[sample_frames < len(df)]
             
-            x_coords = df.loc[sample_frames, "wrist_x_smooth"].values
-            z_coords = df.loc[sample_frames, "wrist_z_smooth"].values
-            y_coords = df.loc[sample_frames, "wrist_y_smooth"].values
+            # Get wrist coordinates
+            wrist_x = df.loc[sample_frames, "wrist_x_smooth"].values
+            wrist_z = df.loc[sample_frames, "wrist_z_smooth"].values
+            
+            # Get shoulder rotation at these frames
+            shoulder_angles = df.loc[sample_frames, "shoulder_angle"].values
             
             # Remove NaN values
-            valid_mask = ~(np.isnan(x_coords) | np.isnan(z_coords) | np.isnan(y_coords))
-            x_coords = x_coords[valid_mask]
-            z_coords = z_coords[valid_mask]
-            y_coords = y_coords[valid_mask]
+            valid_mask = ~(np.isnan(wrist_x) | np.isnan(wrist_z) | np.isnan(shoulder_angles))
+            wrist_x = wrist_x[valid_mask]
+            wrist_z = wrist_z[valid_mask]
+            shoulder_angles = shoulder_angles[valid_mask]
             
-            if len(x_coords) >= 3:
-                # Calculate lateral and forward movement
-                total_movement = np.sqrt(
-                    (x_coords[-1] - x_coords[0])**2 +
-                    (z_coords[-1] - z_coords[0])**2
-                )
+            if len(wrist_x) >= 3:
+                # Method 1: Simple wrist movement
+                wrist_lateral = wrist_x[-1] - wrist_x[0]
+                wrist_forward = abs(wrist_z[-1] - wrist_z[0])
                 
-                if total_movement < 0.001:
-                    swing_angle = 0.0
-                    path_quality = 1.0
-                else:
-                    lateral_movement = x_coords[-1] - x_coords[0]
-                    forward_movement = abs(z_coords[-1] - z_coords[0])
-                    
-                    if forward_movement < 0.001:
-                        forward_movement = 0.001
-                    
-                    # Simple angle calculation
-                    raw_angle = np.degrees(np.arctan(lateral_movement / forward_movement))
-                    
-                    # Linear regression for quality
-                    slope, intercept, r_value, p_value, std_err = linregress(z_coords, x_coords)
-                    regression_angle = np.degrees(np.arctan(slope))
-                    path_quality = r_value ** 2
-                    
-                    # Average the two methods
-                    swing_angle = (raw_angle + regression_angle) / 2
-                    
-                    print(f"[DEBUG] Lateral movement: {lateral_movement:.4f}")
-                    print(f"[DEBUG] Forward movement: {forward_movement:.4f}")
-                    print(f"[DEBUG] Calculated angle: {swing_angle:.2f}°")
+                if wrist_forward < 0.001:
+                    wrist_forward = 0.001
+                
+                wrist_angle = np.degrees(np.arctan(wrist_lateral / wrist_forward))
+                
+                # Method 2: Account for body rotation
+                # Calculate how much shoulder line rotated
+                shoulder_rotation = shoulder_angles[-1] - shoulder_angles[0]
+                
+                # Correct swing path by removing body rotation component
+                corrected_angle = wrist_angle - (shoulder_rotation * 0.5)  # 0.5 factor since arms move relative to shoulders
+                
+                # Method 3: Linear regression for quality
+                slope, intercept, r_value, p_value, std_err = linregress(wrist_z, wrist_x)
+                regression_angle = np.degrees(np.arctan(slope))
+                path_quality = r_value ** 2
+                
+                # Final angle: average of corrected method and regression
+                swing_angle = (corrected_angle + regression_angle) / 2
+                
+                print(f"\n[DEBUG] Swing path calculation:")
+                print(f"  - Wrist movement angle: {wrist_angle:.2f}°")
+                print(f"  - Shoulder rotation: {shoulder_rotation:.2f}°")
+                print(f"  - Corrected angle: {corrected_angle:.2f}°")
+                print(f"  - Regression angle: {regression_angle:.2f}°")
+                print(f"  - FINAL angle: {swing_angle:.2f}°")
+                print(f"  - Path quality R²: {path_quality:.3f}")
+                
             else:
                 swing_angle = 0.0
                 path_quality = 0.0
+                print("[DEBUG] Not enough valid points")
         else:
             swing_angle = 0.0
             path_quality = 0.0
+            print("[DEBUG] Not enough frames between backswing and impact")
     
     except ImportError:
-        print("[INFO] scipy not available")
+        print("[INFO] scipy not available, using simple calculation")
         x_start = df.loc[downswing_start, "wrist_x_smooth"]
         x_end = df.loc[impact_frame, "wrist_x_smooth"]
         z_start = df.loc[downswing_start, "wrist_z_smooth"]
@@ -138,10 +146,10 @@ def analyze_swing(df):
         path_quality = 0.0
     
     except Exception as e:
-        print(f"[Warning] Swing path calculation error: {e}")
+        print(f"[Warning] Swing path error: {e}")
         swing_angle = 0.0
         path_quality = 0.0
-
+    
     # Classify swing path
     abs_angle = abs(swing_angle)
     
@@ -169,20 +177,66 @@ def analyze_swing(df):
         else:
             label = "Strong Out-to-In (Slice)"
             ball_flight = "Slice"
-
-    # Store results AND the correct backswing peak frame
+    
+    # Store results
     df["swing_path_angle"] = swing_angle
     df["swing_path_label"] = label
     df["ball_flight"] = ball_flight
     df["path_quality"] = path_quality
-    df["backswing_peak_frame"] = downswing_start  # ✅ Store the correct frame!
-
-    print(f"[INFO] Swing Analysis:")
+    df["backswing_peak_frame"] = downswing_start
+    df["impact_frame"] = impact_frame
+    
+    # Also keep for compatibility with old code
+    df["x"] = df["wrist_x"]
+    df["y"] = df["wrist_y"]
+    df["z"] = df["wrist_z"]
+    
+    print(f"\n[INFO] ===== FINAL RESULTS =====")
     print(f"  - Backswing peak: frame {downswing_start}")
     print(f"  - Impact: frame {impact_frame}")
+    print(f"  - Swing path: {label}")
     print(f"  - Angle: {swing_angle:.2f}°")
-    print(f"  - Path: {label}")
-    print(f"  - Expected flight: {ball_flight}")
+    print(f"  - Ball flight: {ball_flight}")
     print(f"  - Quality R²: {path_quality:.3f}")
-
+    
     return df
+
+
+def calculate_shoulder_angle(row):
+    """Calculate shoulder line angle (body rotation indicator)"""
+    try:
+        left_x = row['left_shoulder_x']
+        left_z = row['left_shoulder_z']
+        right_x = row['right_shoulder_x']
+        right_z = row['right_shoulder_z']
+        
+        if pd.isna([left_x, left_z, right_x, right_z]).any():
+            return np.nan
+        
+        # Calculate angle of shoulder line
+        dx = right_x - left_x
+        dz = right_z - left_z
+        angle = np.degrees(np.arctan2(dx, dz))
+        return angle
+    except:
+        return np.nan
+
+
+def calculate_hip_angle(row):
+    """Calculate hip line angle (lower body rotation indicator)"""
+    try:
+        left_x = row['left_hip_x']
+        left_z = row['left_hip_z']
+        right_x = row['right_hip_x']
+        right_z = row['right_hip_z']
+        
+        if pd.isna([left_x, left_z, right_x, right_z]).any():
+            return np.nan
+        
+        # Calculate angle of hip line
+        dx = right_x - left_x
+        dz = right_z - left_z
+        angle = np.degrees(np.arctan2(dx, dz))
+        return angle
+    except:
+        return np.nan

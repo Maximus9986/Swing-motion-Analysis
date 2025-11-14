@@ -1,8 +1,6 @@
 import matplotlib.pyplot as plt
-import streamlit as st
 
-def plot_swing(my_wrist, pro_wrist=None, smoothed_my=None, smoothed_pro=None):
-    # Create figure and axis properly
+def plot_swing(my_wrist, pro_wrist=None, smoothed_my=None, smoothed_pro=None, return_fig=False):
     fig, ax = plt.subplots(figsize=(12, 6))
 
     # Player swing
@@ -16,12 +14,12 @@ def plot_swing(my_wrist, pro_wrist=None, smoothed_my=None, smoothed_pro=None):
     if smoothed_pro is not None:
         ax.plot(smoothed_pro, label="Pro Swing (Smoothed)", linewidth=2, color="darkred")
 
-    # Labels, title, and legend
     ax.set_xlabel("Frame")
-    ax.set_ylabel("Wrist Y Position (pixels)")
+    ax.set_ylabel("Wrist Y Position")
     ax.set_title("Swing Comparison")
     ax.legend()
 
-    # Display in Streamlit
-    st.pyplot(fig)
+    if return_fig:
+        return fig
 
+    return None

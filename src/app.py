@@ -99,7 +99,7 @@ if uploaded:
             )
 
         # -----------------
-        # Swing Path Result
+        # Swing Path Result - UPDATED FOR NEW VERSION
         # -----------------
         st.markdown("---")
         st.subheader("🎯 Swing Path Analysis")
@@ -109,25 +109,25 @@ if uploaded:
             angle = df["swing_path_angle"].iloc[0]
             ball_flight = df.get("ball_flight", pd.Series(["Unknown"])).iloc[0]
             
-            # Display metrics
+            # Display metrics in a cleaner way
             col1, col2, col3 = st.columns(3)
             
             with col1:
                 st.markdown("**Swing Path**")
                 st.markdown(f"<div style='font-size: 1.5rem; font-weight: 600; color: #0068C9;'>{path_label}</div>", 
-                        unsafe_allow_html=True)
+                           unsafe_allow_html=True)
             
             with col2:
                 st.markdown("**Path Angle**")
                 # Color code based on angle magnitude
                 angle_color = "#FF4B4B" if abs(angle) > 8 else "#FFA500" if abs(angle) > 3 else "#00C851"
                 st.markdown(f"<div style='font-size: 1.5rem; font-weight: 600; color: {angle_color};'>{angle:.2f}°</div>", 
-                        unsafe_allow_html=True)
+                           unsafe_allow_html=True)
             
             with col3:
                 st.markdown("**Expected Ball Flight**")
                 st.markdown(f"<div style='font-size: 1.5rem; font-weight: 600; color: #0068C9;'>{ball_flight}</div>", 
-                        unsafe_allow_html=True)
+                           unsafe_allow_html=True)
             
             # Quality metric
             if "path_quality" in df.columns:
@@ -141,7 +141,7 @@ if uploaded:
                         help="How straight and consistent your swing path is (0-1, higher is better)"
                     )
             
-            # Interpretation
+            # Interpretation based on angle
             st.markdown("---")
             st.subheader("📖 What This Means:")
             
@@ -167,18 +167,12 @@ if uploaded:
                 if abs_angle < 5:
                     severity = "slight"
                     icon = "🔵"
-                    tips_line1 = "- This is a controlled draw shape - great for distance!"
-                    tips_line2 = "- Keep face square to path to control the curve"
                 elif abs_angle < 8:
                     severity = "moderate"
                     icon = "🔵"
-                    tips_line1 = "- This is a controlled draw shape - great for distance!"
-                    tips_line2 = "- Keep face square to path to control the curve"
                 else:
                     severity = "strong"
                     icon = "🔴"
-                    tips_line1 = "- Too much hook - try rotating shoulders more through impact"
-                    tips_line2 = "- Check your grip - might be too strong"
                 
                 st.info(f"""
                 {icon} **In-to-Out Swing Path ({severity})**
@@ -191,8 +185,8 @@ if uploaded:
                 **Expected ball flight:** {ball_flight} (curves left for right-handed golfer)
                 
                 **Tips:**
-                {tips_line1}
-                {tips_line2}
+                {'- This is a controlled draw shape - great for distance!' if abs_angle < 8 else '- Too much hook - try rotating shoulders more through impact'}
+                {'- Keep face square to path to control the curve' if abs_angle < 8 else '- Check your grip - might be too strong'}
                 """)
             
             else:
@@ -200,18 +194,12 @@ if uploaded:
                 if abs_angle < 5:
                     severity = "slight"
                     icon = "🟡"
-                    tips_line1 = "- This is a controlled fade shape - good for accuracy!"
-                    tips_line2 = "- Fade is safer than hook for most situations"
                 elif abs_angle < 8:
                     severity = "moderate"
                     icon = "🟠"
-                    tips_line1 = "- This is a controlled fade shape - good for accuracy!"
-                    tips_line2 = "- Fade is safer than hook for most situations"
                 else:
                     severity = "strong"
                     icon = "🔴"
-                    tips_line1 = "- Too much slice - focus on swinging from the inside"
-                    tips_line2 = "- Check your grip and make sure you are not coming over the top"
                 
                 st.warning(f"""
                 {icon} **Out-to-In Swing Path ({severity})**
@@ -224,60 +212,128 @@ if uploaded:
                 **Expected ball flight:** {ball_flight} (curves right for right-handed golfer)
                 
                 **Tips:**
-                {tips_line1}
-                {tips_line2}
+                {'- This is a controlled fade shape - good for accuracy!' if abs_angle < 8 else '- Too much slice - focus on swinging from the inside'}
+                {'- Fade is safer than hook for most situations' if abs_angle < 8 else '- Check your grip and make sure you are not coming over the top'}
                 """)
         
         else:
             st.warning("⚠️ Swing path analysis not available.")
 
         # -----------------
-        # Wrist Trajectory Graph
+        # Wrist Trajectory Graph with ALL Swing Phases
         # -----------------
         st.markdown("---")
-        st.subheader("📈 Wrist Trajectory Timeline")
+        st.subheader("📈 Swing Phases Analysis")
         
         if "wrist_y_smooth" in df.columns:
-            fig, ax = plt.subplots(figsize=(12, 6))
+            fig, ax = plt.subplots(figsize=(14, 7))
             
-            # Plot trajectory
+            # Plot main trajectory
             ax.plot(df.index, df["wrist_y_smooth"], 
-                label="Wrist Height", color="blue", linewidth=2)
+                   label="Wrist Height", color="blue", linewidth=3)
             
-            # Mark key points
-            if len(df) > 0:
-                if "backswing_peak_frame" in df.columns:
-                    peak_idx = int(df["backswing_peak_frame"].iloc[0])
-                else:
-                    # Fallback to highest point if not detected
-                    peak_idx = df["wrist_y_smooth"].idxmax()
+            # Get phase markers
+            if "backswing_peak_frame" in df.columns and "impact_frame" in df.columns:
+                backswing_peak = int(df["backswing_peak_frame"].iloc[0])
+                impact = int(df["impact_frame"].iloc[0])
                 
-                peak_value = df.loc[peak_idx, "wrist_y_smooth"]
+                # Calculate additional phase points
+                # Address/Setup: start of video
+                address = 0
                 
-                ax.axvline(peak_idx, color='green', linestyle='--', 
-                        alpha=0.7, label='Top of Backswing (Transition)')
-                ax.scatter(peak_idx, peak_value, color='green', 
-                        s=100, zorder=5)
+                # Backswing: frames from address to backswing peak
+                backswing_mid = (address + backswing_peak) // 2
                 
-                # ✅ ALSO mark impact point
-                # Find impact by speed spike after backswing
-                if "wrist_speed" in df.columns:
-                    search_end = min(peak_idx + 20, len(df) - 1)
-                    search_window = df.loc[peak_idx:search_end]
-                    if len(search_window) > 0:
-                        impact_idx = search_window["wrist_speed"].idxmax()
-                        if not pd.isna(impact_idx) and impact_idx in df.index:
-                            impact_value = df.loc[impact_idx, "wrist_y_smooth"]
-                            ax.axvline(impact_idx, color='red', linestyle='--', 
-                                    alpha=0.7, label='Impact (Speed Peak)')
-                            ax.scatter(impact_idx, impact_value, color='red', 
-                                    s=150, marker='*', zorder=5, edgecolors='black')
+                # Downswing: frames from backswing peak to impact
+                downswing_mid = (backswing_peak + impact) // 2
+                
+                # Follow-through: frames after impact
+                follow_through_start = impact + 5
+                follow_through_end = min(impact + 20, len(df) - 1)
+                
+                # ===== PHASE 1: ADDRESS/SETUP (Frame 0) =====
+                address_y = df.loc[address, "wrist_y_smooth"]
+                ax.axvline(address, color='purple', linestyle=':', linewidth=2, alpha=0.5)
+                ax.scatter(address, address_y, color='purple', s=150, marker='o', 
+                          zorder=10, edgecolors='black', linewidths=2, label='Setup/Address')
+                ax.text(address, address_y, '  Setup', fontsize=10, verticalalignment='bottom')
+                
+                # ===== PHASE 2: BACKSWING PEAK (Green) =====
+                backswing_y = df.loc[backswing_peak, "wrist_y_smooth"]
+                ax.axvline(backswing_peak, color='green', linestyle='--', linewidth=2, alpha=0.7)
+                ax.scatter(backswing_peak, backswing_y, color='green', s=200, marker='o', 
+                          zorder=10, edgecolors='black', linewidths=2, label='Top of Backswing')
+                ax.text(backswing_peak, backswing_y, '  Backswing Peak', fontsize=10, verticalalignment='top')
+                
+                # ===== PHASE 3: IMPACT (Red Star) =====
+                impact_y = df.loc[impact, "wrist_y_smooth"]
+                ax.axvline(impact, color='red', linestyle='--', linewidth=2, alpha=0.7)
+                ax.scatter(impact, impact_y, color='red', s=300, marker='*', 
+                          zorder=10, edgecolors='black', linewidths=2, label='Impact')
+                ax.text(impact, impact_y, '  IMPACT', fontsize=11, fontweight='bold', 
+                       verticalalignment='bottom', color='red')
+                
+                # ===== PHASE 4: FOLLOW-THROUGH (Orange) =====
+                if follow_through_end < len(df):
+                    follow_y = df.loc[follow_through_end, "wrist_y_smooth"]
+                    ax.axvline(follow_through_end, color='orange', linestyle=':', linewidth=2, alpha=0.5)
+                    ax.scatter(follow_through_end, follow_y, color='orange', s=150, marker='o', 
+                              zorder=10, edgecolors='black', linewidths=2, label='Follow-Through')
+                    ax.text(follow_through_end, follow_y, '  Follow Through', fontsize=10, 
+                           verticalalignment='top')
+                
+                # ===== SHADE PHASE REGIONS =====
+                # Backswing region (light green)
+                ax.axvspan(address, backswing_peak, alpha=0.1, color='green', label='Backswing Phase')
+                
+                # Downswing region (light yellow)
+                ax.axvspan(backswing_peak, impact, alpha=0.1, color='yellow', label='Downswing Phase')
+                
+                # Follow-through region (light orange)
+                ax.axvspan(impact, len(df)-1, alpha=0.1, color='orange', label='Follow-Through Phase')
+                
+                # Add phase statistics
+                st.markdown("---")
+                st.subheader("⏱️ Swing Timing")
+                
+                fps = 30  # Assume 30 fps (you can get this from video metadata)
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    backswing_frames = backswing_peak - address
+                    backswing_time = backswing_frames / fps
+                    st.metric("Backswing", f"{backswing_frames} frames", f"{backswing_time:.2f}s")
+                
+                with col2:
+                    downswing_frames = impact - backswing_peak
+                    downswing_time = downswing_frames / fps
+                    st.metric("Downswing", f"{downswing_frames} frames", f"{downswing_time:.2f}s")
+                
+                with col3:
+                    total_swing = impact - address
+                    total_time = total_swing / fps
+                    st.metric("Total Swing", f"{total_swing} frames", f"{total_time:.2f}s")
+                
+                with col4:
+                    tempo_ratio = backswing_frames / downswing_frames if downswing_frames > 0 else 0
+                    st.metric("Tempo Ratio", f"{tempo_ratio:.1f}:1", 
+                             help="Backswing to downswing ratio (3:1 is ideal)")
             
-            ax.set_xlabel("Frame Number", fontsize=12)
-            ax.set_ylabel("Wrist Height (normalized)", fontsize=12)
-            ax.set_title("Wrist Path During Swing", fontsize=14, fontweight='bold')
-            ax.legend(loc='best')
-            ax.grid(True, alpha=0.3)
+            else:
+                # Fallback if phase data not available
+                peak_idx = df["wrist_y_smooth"].idxmax()
+                peak_value = df["wrist_y_smooth"].iloc[peak_idx]
+                ax.axvline(peak_idx, color='green', linestyle='--', alpha=0.7)
+                ax.scatter(peak_idx, peak_value, color='green', s=100, zorder=5)
+            
+            ax.set_xlabel("Frame Number", fontsize=13, fontweight='bold')
+            ax.set_ylabel("Wrist Height (normalized)", fontsize=13, fontweight='bold')
+            ax.set_title("Complete Swing Analysis - All Phases", fontsize=15, fontweight='bold')
+            ax.legend(loc='upper right', fontsize=9, framealpha=0.9)
+            ax.grid(True, alpha=0.3, linestyle='--')
+            
+            # Make plot more readable
+            plt.tight_layout()
             
             st.pyplot(fig)
             
