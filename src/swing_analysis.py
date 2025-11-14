@@ -1,5 +1,6 @@
 import numpy as np
 import pandas as pd
+from scipy.signal import find_peaks
 
 
 def analyze_swing(df):
@@ -18,33 +19,105 @@ def analyze_swing(df):
 
     # -----------------------------------
     # 2. Detect backswing start
-    #    First major drop in wrist height
     # -----------------------------------
-    dy = np.diff(y)
-    drop_threshold = -0.015
-    drop_indices = np.where(dy < drop_threshold)[0]
+    def detect_backswing_start_robust(y):
+        """
+        Robust backswing detection that adapts to different videos.
+        Strategy: Find long stable period, then detect significant deviation.
+        """
+        
+        # Calculate rolling statistics
+        window = 20
+        rolling_mean = pd.Series(y).rolling(window, center=True).mean()
+        rolling_std = pd.Series(y).rolling(window, center=True).std()
+        
+        # Find the longest stable period in the first half of video
+        max_search = min(len(y) // 2, 250)  # Don't search past halfway point or frame 250
+        
+        stability_threshold = 0.01  # Low std = stable
+        min_stable_length = 40  # Need at least 40 frames of stability
+        
+        stable_start = None
+        stable_end = None
+        longest_stable = 0
+        current_stable_start = None
+        current_stable_length = 0
+        
+        # Find longest stable segment
+        for i in range(window, max_search):
+            if rolling_std.iloc[i] < stability_threshold:
+                if current_stable_start is None:
+                    current_stable_start = i
+                current_stable_length += 1
+            else:
+                # Stability broken
+                if current_stable_length > longest_stable:
+                    longest_stable = current_stable_length
+                    stable_start = current_stable_start
+                    stable_end = i - 1
+                current_stable_start = None
+                current_stable_length = 0
+        
+        # Check final segment
+        if current_stable_length > longest_stable:
+            stable_start = current_stable_start
+            stable_end = max_search - 1
+        
+        # If we found a stable period, look for movement after it
+        if stable_start is not None and (stable_end - stable_start) >= min_stable_length:
+            # Get the mean Y value during stable address
+            address_mean = np.mean(y[stable_start:stable_end])
+            
+            # Look for significant drop after stable period
+            drop_threshold = 0.02  # 2cm drop from address mean
+            
+            for i in range(stable_end, min(stable_end + 50, len(y))):
+                if y[i] < address_mean - drop_threshold:
+                    return max(i - 5, stable_end)  # Go back 5 frames to catch start of movement
+        
+        # Fallback: use derivative-based detection
+        dy = np.diff(y)
+        drop_threshold = -0.01
+        consecutive = 5
+        
+        for i in range(20, min(250, len(dy) - consecutive)):
+            if np.all(dy[i:i + consecutive] < drop_threshold):
+                return i
+        
+        return 0
 
-    backswing_start = drop_indices[0] if len(drop_indices) else 0
+    backswing_start = detect_backswing_start_robust(y)
 
     # -----------------------------------
     # 3. Top of backswing (lowest Y after start)
     # -----------------------------------
     search_end = min(backswing_start + 80, len(df) - 1)
     segment = y[backswing_start:search_end]
-    backswing_top = backswing_start + np.argmin(segment)
+    
+    # Compute frame-to-frame difference
+    dy = np.diff(segment)
+    
+    # Find first point where derivative changes from negative to positive
+    turning_points = np.where(dy > 0)[0]
+    if len(turning_points) > 0:
+        backswing_top = backswing_start + turning_points[0]
+    else:
+    # fallback: lowest point if no turning point found
+        backswing_top = backswing_start + np.argmin(segment)
+    
 
     # -----------------------------------
     # 4. Impact detection (highest velocity)
     # -----------------------------------
-    vel = np.abs(np.diff(y))
-    impact_search_start = backswing_top
-    impact_search_end = min(impact_search_start + 40, len(vel) - 1)
+    impact_search_end = min(backswing_top + 50, len(y) - 1)
+    segment_downswing = y[backswing_top:impact_search_end]
+    
+    peaks, _ = find_peaks(segment_downswing)
 
-    if impact_search_end <= impact_search_start:
-        impact = backswing_top + 10
+    if len(peaks) > 0:
+        impact = backswing_top + peaks[np.argmax(segment_downswing[peaks])]
     else:
-        local_vel = vel[impact_search_start:impact_search_end]
-        impact = impact_search_start + np.argmax(local_vel)
+        impact = backswing_top + len(segment_downswing) - 1
 
     # Save indices
     df["backswing_start_idx"] = backswing_start
@@ -54,28 +127,35 @@ def analyze_swing(df):
     # -----------------------------------
     # 5. Swing Path (X vs Z)
     # -----------------------------------
-    try:
-        from scipy.stats import linregress
+    # -----------------------------------
+    # Use smoothed X values
+    x = df["wrist_x_smooth"].values
 
-        sample_frames = np.linspace(backswing_top, impact, 10, dtype=int)
+    # Look 8 frames before impact (or as many as available)
+    pre_impact_frame = max(impact - 8, 0)
 
-        x_vals = df.loc[sample_frames, "wrist_x_smooth"].values
-        z_vals = df.loc[sample_frames, "wrist_z_smooth"].values
+    # Change in X direction right before impact
+    delta_x = x[impact] - x[pre_impact_frame]
 
-        mask = ~(np.isnan(x_vals) | np.isnan(z_vals))
-        x_vals, z_vals = x_vals[mask], z_vals[mask]
+    # Swing path angle (simple proxy): arctan(delta_x / small forward-distance)
+    # We use a small constant scale to convert delta_x into an angle-like value
+    swing_angle = np.degrees(np.arctan(delta_x * 8))  # scale factor = 8 (tunable)
 
-        if len(x_vals) >= 3:
-            slope, _, r_val, _, _ = linregress(z_vals, x_vals)
-            swing_angle = np.degrees(np.arctan(slope))
-            path_quality = r_val**2
-        else:
-            swing_angle = 0.0
-            path_quality = 0.0
+    # Path quality placeholder for now
+    path_quality = 1.0
 
-    except Exception:
-        swing_angle = 0.0
-        path_quality = 0.0
+    # Classify ball flight based on delta_x
+    if delta_x > 0.02:
+        label = "In-to-Out (Draw/Hook tendency)"
+    elif delta_x < -0.02:
+        label = "Out-to-In (Fade/Slice tendency)"
+    else:
+        label = "Neutral / Straight"
+
+    df["swing_path_angle"] = swing_angle
+    df["swing_path_label"] = label
+    df["path_quality"] = path_quality
+
 
     # -----------------------------------
     # 6. Ball flight classification
