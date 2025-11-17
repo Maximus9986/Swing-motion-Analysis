@@ -20,74 +20,56 @@ def analyze_swing(df):
     # -----------------------------------
     # 2. Detect backswing start
     # -----------------------------------
+    # Detect backswing start
     def detect_backswing_start_robust(y):
-        """
-        Robust backswing detection that adapts to different videos.
-        Strategy: Find long stable period, then detect significant deviation.
-        """
-        
-        # Calculate rolling statistics
         window = 20
-        rolling_mean = pd.Series(y).rolling(window, center=True).mean()
+        max_search = min(len(y)//2, 250)
+        stability_threshold = 0.01
+        min_stable_length = 10
+        max_stable_length = 40
+
         rolling_std = pd.Series(y).rolling(window, center=True).std()
-        
-        # Find the longest stable period in the first half of video
-        max_search = min(len(y) // 2, 250)  # Don't search past halfway point or frame 250
-        
-        stability_threshold = 0.01  # Low std = stable
-        min_stable_length = 40  # Need at least 40 frames of stability
-        
-        stable_start = None
-        stable_end = None
-        longest_stable = 0
-        current_stable_start = None
-        current_stable_length = 0
-        
-        # Find longest stable segment
+
+        stable_segments = []
+        current_start = None
+        current_length = 0
+
         for i in range(window, max_search):
             if rolling_std.iloc[i] < stability_threshold:
-                if current_stable_start is None:
-                    current_stable_start = i
-                current_stable_length += 1
+                if current_start is None:
+                    current_start = i
+                current_length += 1
             else:
-                # Stability broken
-                if current_stable_length > longest_stable:
-                    longest_stable = current_stable_length
-                    stable_start = current_stable_start
-                    stable_end = i - 1
-                current_stable_start = None
-                current_stable_length = 0
-        
-        # Check final segment
-        if current_stable_length > longest_stable:
-            stable_start = current_stable_start
-            stable_end = max_search - 1
-        
-        # If we found a stable period, look for movement after it
-        if stable_start is not None and (stable_end - stable_start) >= min_stable_length:
-            # Get the mean Y value during stable address
-            address_mean = np.mean(y[stable_start:stable_end])
-            
-            # Look for significant drop after stable period
-            drop_threshold = 0.02  # 2cm drop from address mean
-            
-            for i in range(stable_end, min(stable_end + 50, len(y))):
-                if y[i] < address_mean - drop_threshold:
-                    return max(i - 5, stable_end)  # Go back 5 frames to catch start of movement
-        
-        # Fallback: use derivative-based detection
+                if current_start is not None and current_length >= min_stable_length:
+                    stable_segments.append((current_start, i-1, current_length))
+                current_start = None
+                current_length = 0
+
+        if current_start is not None and current_length >= min_stable_length:
+            stable_segments.append((current_start, max_search-1, current_length))
+
+        if stable_segments:
+            stable_segments.sort(key=lambda x: x[2], reverse=True)
+            stable_start, stable_end, _ = stable_segments[0]
+
+            # ✅ Backswing starts **immediately after the stable period ends**
+            backswing_start = stable_end + 1
+            return backswing_start
+
+        # fallback: derivative-based
         dy = np.diff(y)
-        drop_threshold = -0.01
+        derivative_drop = -0.01
         consecutive = 5
-        
-        for i in range(20, min(250, len(dy) - consecutive)):
-            if np.all(dy[i:i + consecutive] < drop_threshold):
+        for i in range(20, min(250, len(dy)-consecutive)):
+            if np.all(dy[i:i+consecutive] < derivative_drop):
                 return i
-        
+
         return 0
+
 
     backswing_start = detect_backswing_start_robust(y)
 
+    
     # -----------------------------------
     # 3. Top of backswing (lowest Y after start)
     # -----------------------------------
@@ -131,20 +113,17 @@ def analyze_swing(df):
     # Use smoothed X values
     x = df["wrist_x_smooth"].values
 
-    # Look 8 frames before impact (or as many as available)
-    pre_impact_frame = max(impact - 8, 0)
+    # Pre- and post-impact frames
+    pre_frame  = max(impact - 8, 0)
+    post_frame = min(impact + 8, len(x) - 1)
 
-    # Change in X direction right before impact
-    delta_x = x[impact] - x[pre_impact_frame]
+    # Compute delta in both directions
+    delta_x = x[post_frame] - x[pre_frame]
 
-    # Swing path angle (simple proxy): arctan(delta_x / small forward-distance)
-    # We use a small constant scale to convert delta_x into an angle-like value
-    swing_angle = np.degrees(np.arctan(delta_x * 8))  # scale factor = 8 (tunable)
+    # Convert delta to angle (scaled)
+    swing_angle = np.degrees(np.arctan(delta_x * 6))  # scale factor 6, slightly softer
 
-    # Path quality placeholder for now
-    path_quality = 1.0
-
-    # Classify ball flight based on delta_x
+    # Classification
     if delta_x > 0.02:
         label = "In-to-Out (Draw/Hook tendency)"
     elif delta_x < -0.02:
@@ -154,7 +133,7 @@ def analyze_swing(df):
 
     df["swing_path_angle"] = swing_angle
     df["swing_path_label"] = label
-    df["path_quality"] = path_quality
+    df["path_quality"] = 1.0
 
 
     # -----------------------------------
@@ -183,10 +162,8 @@ def analyze_swing(df):
 
     tempo_ratio = round(backswing_time / downswing_time, 2) if downswing_time > 0 else 0.0
 
-    df["swing_path_angle"] = swing_angle
-    df["swing_path_label"] = label
+    
     df["ball_flight"] = ball_flight
-    df["path_quality"] = path_quality
     df["tempo_ratio"] = tempo_ratio
 
     df["backswing_frames"] = backswing_time
