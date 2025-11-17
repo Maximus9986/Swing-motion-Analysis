@@ -133,30 +133,54 @@ def analyze_swing(df):
     # -----------------------------------
     # -----------------------------------
     # Use smoothed X values
-    x = df["wrist_x_smooth"].values
+    try:
+        from scipy.stats import linregress
 
-    # Pre- and post-impact frames
-    pre_frame  = max(impact - 8, 0)
-    post_frame = min(impact + 8, len(x) - 1)
+        # Sample frames AROUND impact (not entire downswing)
+        # This captures the actual club path through the ball
+        pre_impact_frames = 5   # 5 frames before impact
+        post_impact_frames = 5  # 5 frames after impact
+        
+        start_frame = max(impact - pre_impact_frames, backswing_top)
+        end_frame = min(impact + post_impact_frames, len(df) - 1)
+        
+        sample_frames = np.linspace(start_frame, end_frame, 10, dtype=int)
 
-    # Compute delta in both directions
-    delta_x = x[post_frame] - x[pre_frame]
+        x_vals = df.loc[sample_frames, "wrist_x_smooth"].values
+        z_vals = df.loc[sample_frames, "wrist_z_smooth"].values
 
-    # Convert delta to angle (scaled)
-    swing_angle = np.degrees(np.arctan(delta_x * 6))  # scale factor 6, slightly softer
+        # Remove any NaN values
+        mask = ~(np.isnan(x_vals) | np.isnan(z_vals))
+        x_vals, z_vals = x_vals[mask], z_vals[mask]
 
-    # Classification
-    if delta_x > 0.02:
-        label = "In-to-Out (Draw/Hook tendency)"
-    elif delta_x < -0.02:
-        label = "Out-to-In (Fade/Slice tendency)"
-    else:
+        if len(x_vals) >= 3:
+            # Linear regression: X = slope * Z + intercept
+            slope, _, r_val, _, _ = linregress(z_vals, x_vals)
+            
+            # Convert slope to angle
+            swing_angle = np.degrees(np.arctan(slope))
+            path_quality = r_val**2
+            
+            # Classification based on angle
+            if swing_angle > 2:
+                label = "In-to-Out (Draw/Hook tendency)"
+            elif swing_angle < -2:
+                label = "Out-to-In (Fade/Slice tendency)"
+            else:
+                label = "Neutral / Straight"
+        else:
+            swing_angle = 0.0
+            path_quality = 0.0
+            label = "Neutral / Straight"
+
+    except Exception:
+        swing_angle = 0.0
+        path_quality = 0.0
         label = "Neutral / Straight"
 
     df["swing_path_angle"] = swing_angle
     df["swing_path_label"] = label
-    df["path_quality"] = 1.0
-
+    df["path_quality"] = path_quality
 
     # -----------------------------------
     # 6. Ball flight classification
@@ -164,16 +188,12 @@ def analyze_swing(df):
     abs_angle = abs(swing_angle)
 
     if abs_angle < 2:
-        label = "Neutral / Straight"
         ball_flight = "Straight"
     elif abs_angle < 5:
-        label = "Slight In-to-Out" if swing_angle > 0 else "Slight Out-to-In"
         ball_flight = "Baby Draw" if swing_angle > 0 else "Baby Fade"
     elif abs_angle < 8:
-        label = "In-to-Out (Draw)" if swing_angle > 0 else "Out-to-In (Fade)"
         ball_flight = "Draw" if swing_angle > 0 else "Fade"
     else:
-        label = "Strong In-to-Out (Hook)" if swing_angle > 0 else "Strong Out-to-In (Slice)"
         ball_flight = "Hook" if swing_angle > 0 else "Slice"
 
     # -----------------------------------
@@ -184,10 +204,8 @@ def analyze_swing(df):
 
     tempo_ratio = round(backswing_time / downswing_time, 2) if downswing_time > 0 else 0.0
 
-    
     df["ball_flight"] = ball_flight
     df["tempo_ratio"] = tempo_ratio
-
     df["backswing_frames"] = backswing_time
     df["downswing_frames"] = downswing_time
 
