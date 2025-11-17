@@ -22,51 +22,73 @@ def analyze_swing(df):
     # -----------------------------------
     # Detect backswing start
     def detect_backswing_start_robust(y):
-        window = 20
-        max_search = min(len(y)//2, 250)
-        stability_threshold = 0.01
-        min_stable_length = 10
-        max_stable_length = 40
+        window = 20                # smoothing window for stability measurement
+        max_search = min(len(y)//2, 250)  # only search in first half of the video
+        stability_threshold = 0.01 # max std to consider as stable
+        min_stable_length = 10     # minimum frames of stability we accept
+        max_stable_length = 40     # preferred maximum stable frames
+        post_stable_search = 50    # frames after stable period to detect movement
+        drop_threshold = 0.02      # 2cm drop from stable mean to detect movement
 
+        # Compute simple rolling std to measure stability (centered)
         rolling_std = pd.Series(y).rolling(window, center=True).std()
 
+        # -----------------------------------
+        # 2. Find all stable segments
+        # -----------------------------------
         stable_segments = []
         current_start = None
         current_length = 0
 
         for i in range(window, max_search):
-            if rolling_std.iloc[i] < stability_threshold:
+            if rolling_std.iloc[i] < stability_threshold:  # frame is stable
                 if current_start is None:
                     current_start = i
                 current_length += 1
             else:
+                # Stability broken, check if current segment is acceptable
                 if current_start is not None and current_length >= min_stable_length:
                     stable_segments.append((current_start, i-1, current_length))
                 current_start = None
                 current_length = 0
 
+        # check final segment if it reaches max_search
         if current_start is not None and current_length >= min_stable_length:
             stable_segments.append((current_start, max_search-1, current_length))
 
+        # -----------------------------------
+        # 3. Pick longest segment first
+        # -----------------------------------
         if stable_segments:
+            # sort descending by length
             stable_segments.sort(key=lambda x: x[2], reverse=True)
-            stable_start, stable_end, _ = stable_segments[0]
+            stable_start, stable_end, length = stable_segments[0]
 
-            # ✅ Backswing starts **immediately after the stable period ends**
-            backswing_start = stable_end + 1
-            return backswing_start
+            # compute mean Y during stable period
+            address_mean = np.mean(y[stable_start:stable_end])
 
-        # fallback: derivative-based
+            # search for backswing start after stable period
+            for i in range(stable_end, min(stable_end + post_stable_search, len(y))):
+                if y[i] < address_mean - drop_threshold:
+                    # Go back a few frames to catch start of movement
+                    return max(i - 5, stable_end)
+
+        # -----------------------------------
+        # 4. Fallback: derivative-based detection
+        # -----------------------------------
         dy = np.diff(y)
         derivative_drop = -0.01
         consecutive = 5
-        for i in range(20, min(250, len(dy)-consecutive)):
+        for i in range(20, min(250, len(dy) - consecutive)):
             if np.all(dy[i:i+consecutive] < derivative_drop):
                 return i
 
+        # -----------------------------------
+        # 5. Final fallback
+        # -----------------------------------
         return 0
 
-
+    # CALL THE FUNCTION
     backswing_start = detect_backswing_start_robust(y)
 
     
