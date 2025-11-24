@@ -138,8 +138,8 @@ def analyze_swing(df):
 
         # Sample frames AROUND impact (not entire downswing)
         # This captures the actual club path through the ball
-        pre_impact_frames = 5   # 5 frames before impact
-        post_impact_frames = 5  # 5 frames after impact
+        pre_impact_frames = 1   # 5 frames before impact
+        post_impact_frames = 3  # 5 frames after impact
         
         start_frame = max(impact - pre_impact_frames, backswing_top)
         end_frame = min(impact + post_impact_frames, len(df) - 1)
@@ -162,9 +162,9 @@ def analyze_swing(df):
             path_quality = r_val**2
             
             # Classification based on angle
-            if swing_angle > 2:
+            if swing_angle > 3:
                 label = "In-to-Out (Draw/Hook tendency)"
-            elif swing_angle < -2:
+            elif swing_angle < -3:
                 label = "Out-to-In (Fade/Slice tendency)"
             else:
                 label = "Neutral / Straight"

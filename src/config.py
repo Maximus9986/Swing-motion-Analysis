@@ -9,8 +9,8 @@ MIN_PERIODS = 1
 
 # === SWING PHASE DETECTION ===
 MIN_VIDEO_FRAMES = 30  # minimum frames required for analysis
-BACKSWING_SEARCH_START = 10  # frames to skip at start
-IMPACT_SEARCH_WINDOW = 15  # frames after downswing to search for impact
+BACKSWING_SEARCH_START = 5  # frames to skip at start
+IMPACT_SEARCH_WINDOW = 5  # frames after downswing to search for impact
 
 # === SWING PATH CLASSIFICATION ===
 # Angles in degrees for swing path classification

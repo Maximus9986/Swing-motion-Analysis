@@ -46,11 +46,11 @@ if uploaded:
 
     st.success("✅ Analysis complete")
 
-    # Show overlay if exists
-    if os.path.exists(overlay_path):
-        st.subheader("📹 Overlay video (pose)")
-        with open(overlay_path, "rb") as vf:
-            st.video(vf.read())
+    # # Show overlay if exists
+    # if os.path.exists(overlay_path):
+    #     st.subheader("📹 Overlay video (pose)")
+    #     with open(overlay_path, "rb") as vf:
+    #         st.video(vf.read())
 
     # Show metrics
     st.subheader("🎯 Swing Summary")
@@ -64,6 +64,7 @@ if uploaded:
 
     st.markdown("**Path classification:** " + str(df["swing_path_label"].iloc[0]))
     st.markdown("**Path angle:** " + (f"{df['swing_path_angle'].iloc[0]:.2f}°" if pd.notna(df['swing_path_angle'].iloc[0]) else "N/A"))
+    st.markdown("**Predicted Ball Flight:** " + str(df["ball_flight"].iloc[0])) 
     st.markdown("**Tempo (backswing/downswing frames)**: " + f"{df['backswing_frames'].iloc[0]} / {df['downswing_frames'].iloc[0]} (ratio {df['tempo_ratio'].iloc[0]})")
 
     # Plots
