@@ -68,13 +68,29 @@ def analyze_swing(df):
             address_mean = np.mean(y[stable_start:stable_end])
 
             # search for backswing start after stable period
+            y_s = pd.Series(y).rolling(5, center=True, min_periods=1).mean()
+
+            # Compute velocity (first derivative)
+            dy = np.gradient(y_s)
+
+            # Adapt threshold to the actual stability noise
+            address_noise = np.std(y_s[stable_start:stable_end])
+            adaptive_drop = max(drop_threshold, 2 * address_noise)
+
+            # Velocity must confirm real movement
+            vel_threshold = -0.0015  # very small, very safe
+
             for i in range(stable_end, min(stable_end + post_stable_search, len(y))):
-                if y[i] < address_mean - drop_threshold:
-                    # Go back a few frames to catch start of movement
-                    return max(i - 5, stable_end)
+
+                cond_drop = y_s[i] < (address_mean - adaptive_drop)
+                cond_vel  = dy[i] < vel_threshold
+
+                if cond_drop and cond_vel:
+                    return max(i - 3, stable_end)
+
 
         # -----------------------------------
-        # 4. Fallback: derivative-based detection
+        # 4. Fallback
         # -----------------------------------
         dy = np.diff(y)
         derivative_drop = -0.01
@@ -111,7 +127,7 @@ def analyze_swing(df):
     
 
     # -----------------------------------
-    # 4. Impact detection (highest velocity)
+    # 4. Impact detection 
     # -----------------------------------
     impact_search_end = min(backswing_top + 50, len(y) - 1)
     segment_downswing = y[backswing_top:impact_search_end]
@@ -138,8 +154,8 @@ def analyze_swing(df):
 
         # Sample frames AROUND impact (not entire downswing)
         # This captures the actual club path through the ball
-        pre_impact_frames = 1   # 5 frames before impact
-        post_impact_frames = 3  # 5 frames after impact
+        pre_impact_frames = 1   # 1 frames before impact
+        post_impact_frames = 3  # 3 frames after impact
         
         start_frame = max(impact - pre_impact_frames, backswing_top)
         end_frame = min(impact + post_impact_frames, len(df) - 1)

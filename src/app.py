@@ -9,7 +9,13 @@ from swing_analysis import analyze_swing
 from visualisation import plot_wrist_timeline, plot_birds_eye, plot_tempo
 
 st.set_page_config(page_title="Golf Swing Analyzer", layout="wide")
-st.title("🏌️ Golf Swing Analyzer")
+
+st.markdown("""
+<div style="text-align:center;">
+    <img src="https://media.giphy.com/media/Q67BhXCom9PepOhYZd/giphy.gif" width="120"><br>
+    <h1 style="font-size:42px;">Golf Swing Analyzer</h1>
+</div>
+""", unsafe_allow_html=True)
 
 # ensure Data folder
 os.makedirs(os.path.join("..", "Data"), exist_ok=True)
