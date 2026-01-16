@@ -1,4 +1,4 @@
-# src/app.py
+# python -m streamlit run app.py
 import streamlit as st
 import pandas as pd
 import os
@@ -36,8 +36,12 @@ if uploaded:
     st.info("⏳ Extracting pose & generating overlay... this may take a bit")
     overlay_path = os.path.join(DATA_DIR, "overlay.mp4")
 
-    # Run pose extraction (writes overlay)
-    pose_rows = extract_pose(player_video_path, output_path=overlay_path, write_overlay=True)
+    pose_rows = extract_pose(
+    player_video_path,
+    output_path=overlay_path,
+    write_overlay=True,
+    use_3d=False   
+)
 
     if not pose_rows:
         st.error("Pose extraction failed or video could not be opened.")
