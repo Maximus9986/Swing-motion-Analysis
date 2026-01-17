@@ -56,7 +56,7 @@ def analyze_swing(df):
             )
 
             max_search = min(len(y) // 2, 250)
-            stability_threshold = 0.01
+            stability_threshold = 0.06
             min_stable_length = 12
 
             stable_segments = []
@@ -157,8 +157,6 @@ def analyze_swing(df):
         impact_relative = np.argmin(np.abs(downswing_y - address_y))
         impact = search_start + impact_relative
         
-        print(f"DEBUG: Impact = {impact}")
-        print(f"DEBUG: Y at impact = {y[impact]:.4f}")
 
         # Save indices
         df.loc[:, "backswing_start_idx"] = backswing_start
