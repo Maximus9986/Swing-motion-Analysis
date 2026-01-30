@@ -1,0 +1,8 @@
+numpy==1.26.4
+mediapipe==0.10.9
+opencv-python==4.8.1.78
+pandas==2.1.4
+scipy==1.11.4
+matplotlib==3.8.2
+streamlit==1.29.0
+plotly==5.18.0

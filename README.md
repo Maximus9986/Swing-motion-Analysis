@@ -111,9 +111,9 @@ SMOOTHING_WINDOW = 5  # Frames for moving average
 # Swing path thresholds (degrees)
 SWING_PATH_THRESHOLDS = {
     "strong_in_to_out": 8,
-    "moderate_in_to_out": 3,
-    "neutral_upper": 3,
-    "neutral_lower": -3,
+    "moderate_in_to_out": 4,
+    "neutral_upper": 4,
+    "neutral_lower": -4,
     "moderate_out_to_in": -8,
 }
 
@@ -269,7 +269,7 @@ This project is for academic purposes. Please cite if using for research or educ
 
 ## 👤 Author
 
-**Maximus**
+**Lim Maximus**
 - University of Birmingham
 - Computer Science Final Year Project
 - Year: 2025-2026
@@ -279,11 +279,3 @@ This project is for academic purposes. Please cite if using for research or educ
 - MediaPipe team at Google for pose estimation
 - Streamlit for the web framework
 - Golf instructors and biomechanics research
-
-## 📧 Contact
-
-For questions or issues, please create an issue in the repository or contact through the university.
-
----
-
-**Note**: This system provides analysis for educational and training purposes. For professional golf instruction, please consult a certified golf professional.
