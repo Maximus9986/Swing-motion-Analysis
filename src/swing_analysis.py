@@ -3,17 +3,26 @@ import pandas as pd
 from scipy.signal import find_peaks, savgol_filter
 
 
-def analyze_swing(df):
+def analyze_swing(df, club_type="iron"):
     """
     Full swing analysis pipeline with robust phase detection.
     Works with both MediaPipe 2D and CoMotion 3D data.
-    Returns analyzed DataFrame with swing metrics.
+    
+    Parameters:
+    -----------
+    df : pd.DataFrame
+        Pose data with wrist, elbow, shoulder, hip coordinates
+    club_type : str
+        "iron" or "driver" - affects impact detection
     """
     
     if df is None or df.empty:
         return pd.DataFrame()
     
     try:
+        # Store club type
+        df["club_type"] = club_type
+        
         # -----------------------------------
         # 1. Smooth coordinates
         # -----------------------------------
@@ -130,12 +139,23 @@ def analyze_swing(df):
         
         downswing_y = y[search_start:search_end]
         impact_relative = np.argmin(np.abs(downswing_y - address_y))
-        impact = search_start + impact_relative
+        impact_raw = search_start + impact_relative
         
-        print(f"DEBUG: Impact = {impact}")
+        # Add offset based on club type
+        if club_type.lower() == "driver":
+            
+            impact_offset = 0
+        else:
+            impact_offset = 1
+        
+        impact = min(impact_raw + impact_offset, len(y) - 1)
+        
+        print(f"DEBUG: Impact raw (address level) = {impact_raw}")
+        print(f"DEBUG: Club type = {club_type}")
+        print(f"DEBUG: Impact offset = {impact_offset}")
+        print(f"DEBUG: Final impact = {impact}")
         print(f"DEBUG: Y at impact = {y[impact]:.4f}")
 
-        # Save phase indices
         df.loc[:, "backswing_start_idx"] = backswing_start
         df.loc[:, "backswing_top_idx"] = backswing_top
         df.loc[:, "impact_idx"] = impact
@@ -155,9 +175,6 @@ def analyze_swing(df):
             has_3d = False
         
         # Y change from top to impact
-        # In MediaPipe: Y increases downward (screen coordinates)
-        # In SMPL/CoMotion: Y increases upward
-        # We use absolute value to handle both cases
         y_change = abs(wrist_y[impact] - wrist_y[backswing_top])
         z_change = abs(wrist_z[impact] - wrist_z[backswing_top])
 
@@ -167,12 +184,22 @@ def analyze_swing(df):
             steepness_ratio = 1.0
 
         # Classify hand path
-        if steepness_ratio > 1.5:
-            hand_path_label = "Steep (good for irons)"
-        elif steepness_ratio > 0.8:
-            hand_path_label = "Neutral (versatile)"
+        if club_type.lower() == "driver":
+            # Driver should be shallower
+            if steepness_ratio > 1.2:
+                hand_path_label = "Too steep for driver"
+            elif steepness_ratio > 0.6:
+                hand_path_label = "Neutral (good for driver)"
+            else:
+                hand_path_label = "Shallow (ideal for driver)"
         else:
-            hand_path_label = "Shallow (good for driver)"
+            # Iron can be steeper
+            if steepness_ratio > 1.5:
+                hand_path_label = "Steep (good for irons)"
+            elif steepness_ratio > 0.8:
+                hand_path_label = "Neutral (versatile)"
+            else:
+                hand_path_label = "Shallow (may need more compression)"
 
         df["hand_path_steepness"] = steepness_ratio
         df["hand_path_label"] = hand_path_label
@@ -207,7 +234,6 @@ def analyze_swing(df):
         has_wrist = "wrist_x_smooth" in df.columns
 
         if has_shoulder and has_elbow and has_wrist:
-            # Get joint positions at impact
             if has_3d:
                 shoulder_impact = [
                     df.loc[impact, "shoulder_x_smooth"],
@@ -282,7 +308,7 @@ def analyze_swing(df):
         
         # Find max velocity during downswing
         downswing_start_idx = backswing_top
-        downswing_end_idx = min(impact + 5, len(velocity))  # Include a few frames after impact
+        downswing_end_idx = min(impact + 5, len(velocity))
         
         downswing_velocity = velocity[downswing_start_idx:downswing_end_idx]
         if len(downswing_velocity) > 0:
@@ -296,7 +322,7 @@ def analyze_swing(df):
         df["max_speed_frame"] = max_velocity_frame
         
         # Speed timing - max speed should be AT or JUST BEFORE impact
-        frames_from_impact = max_velocity_frame - impact  # Negative = before impact (good)
+        frames_from_impact = max_velocity_frame - impact
         abs_frames_diff = abs(frames_from_impact)
         
         if abs_frames_diff <= 2:
@@ -377,14 +403,22 @@ def analyze_swing(df):
             else:
                 score += 8
         
-        # Hand path (neutral is ideal)
+        # Hand path (different scoring for driver vs iron)
         max_score += 25
-        if 0.8 <= steepness_ratio <= 1.5:
-            score += 25
-        elif 0.5 <= steepness_ratio <= 2.0:
-            score += 18
+        if club_type.lower() == "driver":
+            if 0.4 <= steepness_ratio <= 1.0:
+                score += 25
+            elif 0.3 <= steepness_ratio <= 1.2:
+                score += 18
+            else:
+                score += 10
         else:
-            score += 10
+            if 0.8 <= steepness_ratio <= 1.5:
+                score += 25
+            elif 0.5 <= steepness_ratio <= 2.0:
+                score += 18
+            else:
+                score += 10
         
         # Speed timing
         max_score += 25
@@ -407,9 +441,8 @@ def analyze_swing(df):
         return df
         
     except Exception as e:
+        df["error"] = str(e)
         print(f"Swing analysis failed: {e}")
-        import traceback
-        traceback.print_exc()
         return df
 
 
@@ -419,12 +452,14 @@ def print_analysis_results(df):
     print("🏌️ SWING ANALYSIS RESULTS")
     print("="*60)
     
-    # Data type indicator
+    # Club type and data type
+    club_type = df['club_type'].iloc[0] if 'club_type' in df.columns else "iron"
     has_3d = df['has_3d_data'].iloc[0] if 'has_3d_data' in df.columns else False
-    print(f"\n📊 Data Type: {'3D (CoMotion/SMPL)' if has_3d else '2D (MediaPipe)'}")
+    print(f"\n🏌️ Club Type: {club_type.upper()}")
+    print(f"📊 Data Type: {'3D (CoMotion/SMPL)' if has_3d else '2D (MediaPipe)'}")
     
     print(f"\n📍 PHASE DETECTION:")
-    print(f"   Address/Backswing Start: Frame {int(df['backswing_start_idx'].iloc[0])}")
+    print(f"   Backswing Start:         Frame {int(df['backswing_start_idx'].iloc[0])}")
     print(f"   Top of Backswing:        Frame {int(df['backswing_top_idx'].iloc[0])}")
     print(f"   Impact:                  Frame {int(df['impact_idx'].iloc[0])}")
     print(f"   Finish:                  Frame {int(df['finish_idx'].iloc[0])}")

@@ -1,14 +1,16 @@
 # python -m streamlit run app.py
 # http://localhost:8501
 
-
 import streamlit as st
 import pandas as pd
 import os
 import tempfile
+import cv2
+from PIL import Image
+import numpy as np
 
 from pose_tracking import extract_pose
-from swing_analysis import analyze_swing, print_analysis_result
+from swing_analysis import analyze_swing, print_analysis_results
 from visualisation import (
     plot_wrist_timeline, 
     plot_hand_path, 
@@ -16,6 +18,100 @@ from visualisation import (
     plot_speed_profile,
     plot_overall_score
 )
+
+
+def extract_phase_frames(video_path, df):
+    """Extract frames at detected swing phases."""
+    
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        return None
+    
+    # Use address_idx if available, otherwise backswing_start_idx
+    address_frame = int(df['address_idx'].iloc[0]) if 'address_idx' in df.columns else int(df['backswing_start_idx'].iloc[0])
+    
+    phases = {
+        'Address': address_frame,
+        'Top of Backswing': int(df['backswing_top_idx'].iloc[0]),
+        'Impact': int(df['impact_idx'].iloc[0]),
+        'Finish': int(df['finish_idx'].iloc[0])
+    }
+    
+    frames = {}
+    
+    for phase_name, frame_idx in phases.items():
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        
+        if ret:
+            frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            frames[phase_name] = {
+                'image': Image.fromarray(frame_rgb),
+                'frame_idx': frame_idx
+            }
+    
+    cap.release()
+    return frames
+
+
+def extract_phase_frames_with_skeleton(video_path, df):
+    """Extract frames at detected swing phases with skeleton overlay."""
+    import mediapipe as mp
+    
+    cap = cv2.VideoCapture(video_path)
+    
+    if not cap.isOpened():
+        return None
+    
+    # Use address_idx if available, otherwise backswing_start_idx
+    address_frame = int(df['address_idx'].iloc[0]) if 'address_idx' in df.columns else int(df['backswing_start_idx'].iloc[0])
+    
+    phases = {
+        'Start of backswing': address_frame,
+        'Top of Backswing': int(df['backswing_top_idx'].iloc[0]),
+        'Impact': int(df['impact_idx'].iloc[0]),
+        'Finish': int(df['finish_idx'].iloc[0])
+    }
+    
+    mp_pose = mp.solutions.pose
+    mp_drawing = mp.solutions.drawing_utils
+    
+    frames = {}
+    
+    with mp_pose.Pose(
+        static_image_mode=True,
+        model_complexity=2,
+        min_detection_confidence=0.5
+    ) as pose:
+        
+        for phase_name, frame_idx in phases.items():
+            cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+            ret, frame = cap.read()
+            
+            if ret:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                results = pose.process(frame_rgb)
+                
+                # Draw skeleton
+                if results.pose_landmarks:
+                    mp_drawing.draw_landmarks(
+                        frame,
+                        results.pose_landmarks,
+                        mp_pose.POSE_CONNECTIONS,
+                        mp_drawing.DrawingSpec(color=(0, 255, 0), thickness=2, circle_radius=3),
+                        mp_drawing.DrawingSpec(color=(255, 0, 0), thickness=2, circle_radius=2)
+                    )
+                
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames[phase_name] = {
+                    'image': Image.fromarray(frame_rgb),
+                    'frame_idx': frame_idx
+                }
+    
+    cap.release()
+    return frames
+
 
 st.set_page_config(page_title="Golf Swing Analyzer", layout="wide")
 
@@ -29,6 +125,24 @@ st.markdown("""
 os.makedirs(os.path.join("..", "Data"), exist_ok=True)
 DATA_DIR = os.path.abspath(os.path.join("..", "Data"))
 
+# =====================
+# CLUB SELECTION
+# =====================
+st.sidebar.header("⚙️ Settings")
+club_type = st.sidebar.radio(
+    "Select Club Type",
+    options=["Iron", "Driver"],
+    index=0,
+    help="Driver: Impact detected after lowest point (hitting up)\nIron: Impact at address level (hitting down)"
+)
+
+st.sidebar.markdown("""
+---
+### Club Type Info:
+- **Iron**: Ball struck with descending blow
+- **Driver**: Ball struck on the upswing (teed up)
+""")
+
 uploaded = st.file_uploader("Upload your swing video (MP4)", type=["mp4", "mov", "avi"])
 
 if uploaded:
@@ -41,7 +155,7 @@ if uploaded:
     st.subheader("📹 Uploaded Video")
     st.video(player_video_path)
 
-    st.info("⏳ Extracting pose & analyzing swing... this may take a moment")
+    st.info(f"⏳ Analyzing swing with **{club_type}** settings... this may take a moment")
     overlay_path = os.path.join(DATA_DIR, "overlay.mp4")
 
     pose_rows = extract_pose(
@@ -56,7 +170,9 @@ if uploaded:
         st.stop()
 
     df = pd.DataFrame(pose_rows)
-    df = analyze_swing(df)
+    
+    # Pass club type to analyze_swing
+    df = analyze_swing(df, club_type=club_type.lower())
 
     # Save CSV
     csv_out = os.path.join(DATA_DIR, "player_swing_analysis.csv")
@@ -66,7 +182,7 @@ if uploaded:
 
     # Data type indicator
     has_3d = df['has_3d_data'].iloc[0] if 'has_3d_data' in df.columns else False
-    st.info(f"📊 Using {'3D pose data' if has_3d else '2D pose data (MediaPipe)'}")
+    st.info(f"📊 Using {'3D pose data' if has_3d else '2D pose data (MediaPipe)'} | Club: **{club_type}**")
 
     # =====================
     # RESULTS SECTION
@@ -92,20 +208,53 @@ if uploaded:
         <div style="text-align:center; padding:20px; background-color:#f0f2f6; border-radius:10px;">
             <h1 style="color:{score_color}; margin:0;">{score}/100</h1>
             <h3 style="margin:0;">{rating}</h3>
+            <p style="margin:5px 0 0 0; color:gray;">Club: {club_type}</p>
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown("---")
 
+    # =====================
+    # PHASE FRAMES DISPLAY
+    # =====================
+    st.subheader("🎬 Swing Phases Visualization")
+    
+    show_skeleton = st.checkbox("Show pose skeleton overlay", value=False)
+    
+    if show_skeleton:
+        phase_frames = extract_phase_frames_with_skeleton(player_video_path, df)
+    else:
+        phase_frames = extract_phase_frames(player_video_path, df)
+    
+    if phase_frames:
+        cols = st.columns(4)
+        
+        for i, (phase_name, frame_data) in enumerate(phase_frames.items()):
+            with cols[i]:
+                st.image(
+                    frame_data['image'], 
+                    caption=f"{phase_name}\nFrame {frame_data['frame_idx']}", 
+                    use_container_width=True
+                )
+    else:
+        st.warning("Could not extract phase frames from video.")
+
+    st.markdown("---")
+        
     # Phase Detection
     st.subheader("📍 Phase Detection")
     col1, col2, col3, col4 = st.columns(4)
+    
+    address_frame = int(df['address_idx'].iloc[0]) if 'address_idx' in df.columns else int(df['backswing_start_idx'].iloc[0])
+    
     with col1:
-        st.metric("Address", f"Frame {int(df['backswing_start_idx'].iloc[0])}")
+        st.metric("Address", f"Frame {address_frame}")
     with col2:
         st.metric("Top of Backswing", f"Frame {int(df['backswing_top_idx'].iloc[0])}")
     with col3:
         st.metric("Impact", f"Frame {int(df['impact_idx'].iloc[0])}")
+        if 'impact_raw_idx' in df.columns:
+            st.caption(f"(Raw: {int(df['impact_raw_idx'].iloc[0])})")
     with col4:
         st.metric("Finish", f"Frame {int(df['finish_idx'].iloc[0])}")
 
@@ -193,12 +342,20 @@ if uploaded:
 else:
     st.info("👆 Upload a swing video to get started.")
     
-    st.markdown("""
+    st.markdown(f"""
     ### How it works:
-    1. Upload a video of your golf swing (side view)
-    2. The app extracts pose landmarks
-    3. Key swing phases are detected automatically
-    4. You get metrics on tempo, hand path, arm extension, and speed timing
+    1. **Select club type** in the sidebar (Iron or Driver)
+    2. Upload a video of your golf swing (side view)
+    3. The app extracts pose landmarks
+    4. Key swing phases are detected automatically
+    5. You get metrics on tempo, hand path, arm extension, and speed timing
+    
+    ### Club Type Differences:
+    | | Iron | Driver |
+    |---|---|---|
+    | **Impact** | At address level (hitting down) | After lowest point (hitting up) |
+    | **Hand Path** | Steeper is better | Shallower is better |
+    | **Ball Position** | Middle of stance | Forward in stance |
     
     ### Tips for best results:
     - Use a side-on camera angle
