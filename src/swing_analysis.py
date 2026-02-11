@@ -3,14 +3,8 @@ import pandas as pd
 from scipy.signal import find_peaks, savgol_filter
 
 
-# -----------------------------
-# Helpers
-# -----------------------------
 def _safe_savgol(series, default_window=7, poly=2):
-    """
-    Safely apply Savitzky-Golay smoothing.
-    Handles short clips + NaNs.
-    """
+
     s = pd.Series(series).astype(float).ffill().bfill()
 
     n = len(s)
@@ -77,7 +71,10 @@ def analyze_swing(df, club_type="iron", fps=None, debug=False):
     df = df.copy()
     club_type = (club_type or "iron").lower().strip()
     df["club_type"] = club_type
-
+    df["backswing_top_idx"] = 0
+    df["impact_raw_idx"] = 0
+    df["impact_idx"] = 0
+    df["finish_idx"] = len(df) - 1
     # -----------------------------
     # 0) Determine if 3D
     # -----------------------------
@@ -99,6 +96,8 @@ def analyze_swing(df, club_type="iron", fps=None, debug=False):
         return df
 
     y = df["wrist_y_smooth"].values.astype(float)
+    n = len(y)
+
 
     # -----------------------------
     # 2) Robust address + backswing start detection
@@ -177,59 +176,110 @@ def analyze_swing(df, club_type="iron", fps=None, debug=False):
         print("DEBUG address_idx:", address_idx, "address_end:", address_end, "address_y:", address_y)
         print("DEBUG backswing_start:", backswing_start)
 
-    # -----------------------------
-    # 3) Top of backswing detection (wrist Y trough after start)
-    # -----------------------------
-    n = len(y)
-    if backswing_start >= n - 5:
-        df["error"] = "Backswing start too late / invalid"
-        return df
 
-    # search window: allow longer swings
-    search_window = min(140, n - backswing_start - 1)
-    segment = y[backswing_start: backswing_start + search_window]
-    seg_range = float(np.nanmax(segment) - np.nanmin(segment))
+# -----------------------------
+    # 3) Top of backswing detection (turning point before big move)
+    # Must have at least MIN_DROP Y movement to be valid backswing
+    # -----------------------------
+    search_window = min(90, len(y) - backswing_start - 1)
+    segment = y[backswing_start : backswing_start + search_window]
+
+    seg_range = float(np.max(segment) - np.min(segment))
     prom = 0.15 * max(seg_range, 1e-6)
 
-    troughs, _ = find_peaks(-segment, prominence=prom, distance=8)
-    if len(troughs) > 0:
-        backswing_top = int(backswing_start + troughs[0])
-    else:
-        backswing_top = int(backswing_start + int(np.nanargmin(segment)))
+    troughs, properties = find_peaks(
+        -segment,
+        prominence=prom,
+        distance=8
+    )
 
+    # Minimum Y drop required from backswing_start to be considered valid backswing
+    MIN_DROP_FROM_START = 0.2
+    LOOKAHEAD = 25
+
+    # Y value at backswing start (address level)
+    y_at_start = y[backswing_start]
+
+    backswing_top = None
+
+    if len(troughs) > 0:
+        for t in troughs:
+            trough_idx = backswing_start + t
+            y_at_trough = y[trough_idx]
+            
+            # Check 1: Must have dropped at least MIN_DROP_FROM_START from start
+            drop_from_start = y_at_start - y_at_trough
+            
+            if drop_from_start < MIN_DROP_FROM_START:
+                # This trough hasn't dropped enough - likely just jitter
+                continue
+            
+            # Check 2: Must have significant movement after this point
+            j = min(t + LOOKAHEAD, len(segment) - 1)
+            move_after = float(np.max(segment[t:j+1]) - np.min(segment[t:j+1]))
+
+            if move_after >= 0.1:  # Some movement after the top
+                backswing_top = int(trough_idx)
+                break
+
+    # Fallback 1: Find deepest trough that meets minimum drop requirement
+    if backswing_top is None and len(troughs) > 0:
+        valid_troughs = []
+        for t in troughs:
+            trough_idx = backswing_start + t
+            y_at_trough = y[trough_idx]
+            drop_from_start = y_at_start - y_at_trough
+            
+            if drop_from_start >= MIN_DROP_FROM_START:
+                valid_troughs.append(t)
+        
+        if valid_troughs:
+            # Pick the deepest valid trough
+            best = int(valid_troughs[np.argmin([segment[t] for t in valid_troughs])])
+            backswing_top = int(backswing_start + best)
+
+    # Fallback 2: Find absolute minimum in segment, but only if it meets drop requirement
+    if backswing_top is None:
+        min_idx = int(np.argmin(segment))
+        y_at_min = segment[min_idx]
+        drop_from_start = y_at_start - y_at_min
+        
+        if drop_from_start >= MIN_DROP_FROM_START:
+            backswing_top = int(backswing_start + min_idx)
+        else:
+            # No valid backswing detected - use start as fallback
+            backswing_top = int(backswing_start)
+            if debug:
+                print(f"WARNING: No backswing detected with drop >= {MIN_DROP_FROM_START}")
+
+    print(f"DEBUG: Backswing start = {backswing_start}")
+    print(f"DEBUG: Y at start = {y_at_start:.4f}")
+    print(f"DEBUG: Backswing top = {backswing_top}")
+    print(f"DEBUG: Y at top = {y[backswing_top]:.4f}")
+    print(f"DEBUG: Drop from start = {y_at_start - y[backswing_top]:.4f}")
     df["backswing_top_idx"] = int(backswing_top)
 
-    if debug:
-        print("DEBUG backswing_top:", backswing_top, "y_top:", y[backswing_top])
-
     # -----------------------------
-    # 4) Impact detection (heuristic)
+    # 4) Impact detection (original style)
     # -----------------------------
-    # We look for the frame in downswing where wrist_y is closest to address_y.
-    # Driver often happens slightly AFTER that "return" because impact is later (upswing).
-    search_start = backswing_top
-    search_end = min(backswing_top + 80, n)  # allow more frames for slower swings
+    search_start = int(backswing_top)
+    search_end = int(min(backswing_top + 80, n))
 
     downswing_y = y[search_start:search_end]
     if len(downswing_y) == 0:
-        impact_raw = backswing_top
+        impact_raw = int(backswing_top)
     else:
         impact_relative = int(np.nanargmin(np.abs(downswing_y - address_y)))
         impact_raw = int(search_start + impact_relative)
 
-    # offset by club type (heuristic)
-    if club_type == "driver":
-        impact_offset = 2   # a bit later
-    else:
-        impact_offset = 0   # irons closer to "return"
-
-    impact = int(min(max(impact_raw + impact_offset, 0), n - 1))
+    impact = int(min(max(impact_raw, 0), n - 1))
 
     df["impact_raw_idx"] = int(impact_raw)
     df["impact_idx"] = int(impact)
 
     if debug:
         print("DEBUG impact_raw:", impact_raw, "impact:", impact, "y_impact:", y[impact])
+
 
     # -----------------------------
     # 5) Hand path (3D uses Z, 2D uses X proxy)
@@ -275,9 +325,7 @@ def analyze_swing(df, club_type="iron", fps=None, debug=False):
     # -----------------------------
     # 6) Arm extension at impact (elbow angle)
     # -----------------------------
-    needed = all(c in df.columns for c in ["shoulder_x_smooth", "shoulder_y_smooth",
-                                          "elbow_x_smooth", "elbow_y_smooth",
-                                          "wrist_x_smooth", "wrist_y_smooth"])
+    needed = all(c in df.columns for c in ["shoulder_x_smooth", "shoulder_y_smooth","elbow_x_smooth", "elbow_y_smooth","wrist_x_smooth", "wrist_y_smooth"])
     if needed:
         if has_3d and all(c in df.columns for c in ["shoulder_z_smooth", "elbow_z_smooth", "wrist_z_smooth"]):
             shoulder = [df.loc[impact, "shoulder_x_smooth"], df.loc[impact, "shoulder_y_smooth"], df.loc[impact, "shoulder_z_smooth"]]
