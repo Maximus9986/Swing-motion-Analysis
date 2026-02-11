@@ -194,7 +194,7 @@ def analyze_swing(df, club_type="iron", fps=None, debug=False):
     )
 
     # Minimum Y drop required from backswing_start to be considered valid backswing
-    MIN_DROP_FROM_START = 0.2
+    MIN_DROP_FROM_START = 0.35
     LOOKAHEAD = 25
 
     # Y value at backswing start (address level)
