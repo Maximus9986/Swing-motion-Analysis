@@ -1,35 +1,34 @@
 # 🏌️ Golf Swing Motion Analysis System
 
-A comprehensive golf swing analysis application using computer vision and biomechanical analysis. This system extracts pose data from swing videos and provides detailed metrics on swing path, tempo, plane consistency, and more.
+A golf swing analysis application that uses computer vision and biomechanical heuristics to analyse golf swings from ordinary video.
+The system focuses on robust swing phase detection, tempo, and body mechanics (early extension) using 2D pose estimation, making it accessible to players without expensive launch monitors or motion-capture systems.
 
 ## 🎯 Features
 
 - **Pose Tracking**: Uses MediaPipe to extract 33-point pose landmarks from video
-- **Swing Phase Detection**: Automatically identifies setup, backswing, downswing, impact, and follow-through
-- **Swing Path Analysis**: Calculates swing path angle and classifies (hook, draw, straight, fade, slice)
-- **Tempo Analysis**: Measures backswing-to-downswing ratio (ideal 3:1)
-- **Swing Plane Consistency**: Evaluates how consistently you stay on plane
+- **Swing Phase Detection**: Automatically identifies address, backswing top, impact, and finish phases
+- **Tempo Analysis**: Measures backswing-to-downswing ratio (ideal ~3:1)
+- **Arm Extension Analysis**: Evaluates elbow angle at impact for proper extension
+- **Speed Timing**: Measures when maximum wrist speed occurs relative to impact
+- **Early Extension Detection**: Side-view proxy for hip drift/rise during the swing
 - **Visual Overlays**: Creates annotated videos with pose landmarks
-- **Comprehensive Charts**: Multiple visualizations including 3D trajectory, speed profiles, and more
+- **Phase Visualization**: Displays key swing positions with optional skeleton overlay
+- **Comprehensive Charts**: Wrist timeline, tempo breakdown, speed profiles, and score analysis
 
 ## 📁 Project Structure
 
 ```
 FYP/
-├── app.py                  # Main Streamlit application
-├── config.py              # Configuration and constants
-├── pose_tracking.py       # Pose extraction module
-├── swing_analysis.py      # Swing analysis algorithms
-├── visualisation.py       # Plotting and visualization
-├── requirements.txt       # Python dependencies
-├── README.md             # This file
-└── Data/                 # Data folder
-    ├── player_swing_data.csv
-    ├── pro_swing.mp4
-    ├── sample_swing.mp4
-    ├── sample_swing1.mp4
-    └── sample_swing2.mp4
-```
+├── app.py                  # Streamlit application
+├── pose_tracking.py        # MediaPipe pose extraction
+├── swing_analysis.py       # Swing phase + biomechanical analysis
+├── visualisation.py        # Plots and charts
+├── requirements.txt
+├── README.md
+└── Data/
+    ├── overlay.mp4
+    ├── player_swing_analysis.csv
+    └── sample_videos/  
 
 ## 🚀 Installation
 
@@ -41,12 +40,12 @@ FYP/
 ### Setup Steps
 
 1. **Clone or download the repository**
-   ```bash
+```bash
    cd /path/to/FYP
-   ```
+```
 
 2. **Create a virtual environment (recommended)**
-   ```bash
+```bash
    python -m venv venv
    
    # On Windows
@@ -54,17 +53,17 @@ FYP/
    
    # On Mac/Linux
    source venv/bin/activate
-   ```
+```
 
 3. **Install dependencies**
-   ```bash
+```bash
    pip install -r requirements.txt
-   ```
+```
 
 4. **Run the application**
-   ```bash
-   streamlit run app.py
-   ```
+```bash
+   python -m streamlit run app.py
+```
 
 5. **Open your browser**
    - The app should automatically open at `http://localhost:8501`
@@ -84,10 +83,14 @@ FYP/
    - Wait for pose extraction (may take 1-2 minutes)
    - Review your results
 
-3. **Download Results**
-   - Download the pose overlay video
-   - Download analysis charts
-   - Download raw CSV data
+3. **View Results**
+   - Overall score and rating displayed prominently
+   - Phase frames show key positions in your swing
+   - Detailed metrics for tempo, arm extension, speed timing, and early extension
+   - Interactive charts for deeper analysis
+
+4. **Download Results**
+   - Download analysis CSV with all metrics
 
 ### Video Recording Tips
 
@@ -100,85 +103,101 @@ For best analysis results:
 - **Background**: Uncluttered, contrasting with golfer
 - **Duration**: Include full swing from setup to follow-through
 
-## 🔧 Configuration
-
-Edit `config.py` to customize analysis parameters:
-
-```python
-# Smoothing
-SMOOTHING_WINDOW = 5  # Frames for moving average
-
-# Swing path thresholds (degrees)
-SWING_PATH_THRESHOLDS = {
-    "strong_in_to_out": 8,
-    "moderate_in_to_out": 4,
-    "neutral_upper": 4,
-    "neutral_lower": -4,
-    "moderate_out_to_in": -8,
-}
-
-# Tempo
-IDEAL_TEMPO_RATIO = 3.0  # Ideal backswing:downswing
-```
 
 ## 📊 Metrics Explained
 
-### Swing Path Analysis
-- **Path Angle**: Direction of club path relative to target line
-  - Positive = In-to-out (draws/hooks)
-  - Negative = Out-to-in (fades/slices)
-  - Near 0 = Straight
-- **Path Quality**: How linear the path is (R² score)
-  - Excellent: >0.85
-  - Good: 0.70-0.85
-  - Fair: 0.50-0.70
-  - Poor: <0.50
-
-### Swing Tempo
-- **Tempo Ratio**: Backswing frames / Downswing frames
-  - Ideal: 3:1 (similar to tour pros)
-  - Higher: Slower, smoother backswing
-  - Lower: Quicker, more aggressive backswing
-
-### Swing Plane
-- **Consistency Score**: How well you maintain swing plane (0-100%)
-  - >80%: Excellent
-  - 60-80%: Good
-  - 40-60%: Fair
-  - <40%: Inconsistent
-
 ### Swing Phases
-- **Setup**: Initial address position
-- **Backswing**: From address to top of swing
-- **Downswing**: From top to impact
-- **Impact**: Ball contact point
-- **Follow-through**: After impact to finish
+| Phase | Description |
+|-------|-------------|
+| **Address** | Initial setup position (stable period before movement) |
+| **Top of Backswing** | Highest point of wrist during backswing (minimum Y value, requires >0.2 drop) |
+| **Impact** | Ball contact point (detected via wrist trajectory peak after downswing) |
+| **Finish** | End of follow-through (when wrist speed stabilizes) |
+
+### Tempo Ratio
+- **Definition**: Backswing frames ÷ Downswing frames
+- **Ideal**: ~3:1 (similar to tour professionals)
+- **Interpretation**:
+  - 2.0–3.5:1 = Good tempo
+  - <2.0:1 = Quick backswing, consider slowing down
+  - >3.5:1 = Slow downswing, consider accelerating through impact
+
+### Arm Extension
+- **Metric**: Elbow angle at impact (degrees)
+- **Ideal**: >155° (fully extended)
+- **Ratings**:
+  - >155° = Excellent (fully extended)
+  - 140–155° = Good (slight bend is normal)
+  - 125–140° = Moderate
+  - <125° = Needs improvement (chicken wing)
+
+### Speed Timing
+- **Metric**: Frame difference between max wrist speed and impact
+- **Ideal**: Max speed at or just before impact (±2 frames)
+- **Ratings**:
+  - ±2 frames = Excellent
+  - ±4 frames = Good
+  - ±6 frames = Moderate
+  - >6 frames = Early/Late release
+
+### Early Extension
+- **Definition**: Hip movement toward the ball during downswing
+- **Metric**: Normalized hip drift (X) and rise (Y) from address to impact
+- **Score**: 0–100 (lower is better)
+- **Ratings**:
+  - 0–30 = Low risk (good)
+  - 31–60 = Moderate risk
+  - 61–100 = High risk
+
+### Overall Score
+Weighted combination of:
+- Tempo (25 points)
+- Arm Extension (25 points)
+- Speed Timing (25 points)
+- Early Extension (25 points)
+
+| Score | Rating |
+|-------|--------|
+| 85–100 | Excellent |
+| 70–84 | Good |
+| 55–69 | Average |
+| <55 | Needs Work |
 
 ## 🔬 Technical Details
 
 ### Pose Detection
 - Uses Google MediaPipe Pose
-- Extracts 33 3D landmarks per frame
-- Tracks: wrists, elbows, shoulders, hips, knees, ankles
-- Confidence thresholds ensure quality
+- Extracts 33 landmarks per frame
+- Key joints tracked: wrists, elbows, shoulders, hips
+- Smoothing applied via Savitzky-Golay filter (window=7, polyorder=2)
 
-### Swing Path Algorithm
-1. Detect swing phases using wrist trajectory
-2. Extract downswing segment
-3. Perform linear regression on wrist path (X-Z plane)
-4. Calculate angle from regression slope
-5. Classify based on configurable thresholds
+### Phase Detection Algorithm
 
-### Phase Detection
-1. **Backswing peak**: Maximum wrist height
-2. **Address**: Most stable position before backswing
-3. **Impact**: Maximum speed during downswing
-4. **Follow-through**: Motion deceleration after impact
+1. **Address Detection**
+   - Finds stable segment early in video using rolling standard deviation
+   - Identifies period of minimal wrist movement
 
-### Data Smoothing
-- Rolling average with configurable window (default: 5 frames)
-- Linear interpolation for missing data
-- Preserves key features while reducing noise
+2. **Backswing Start**
+   - Detects first consistent downward movement from address
+   - Requires significant future drop (≥30% of total range or 0.2 minimum)
+
+3. **Top of Backswing**
+   - Finds troughs (local minima) in wrist Y trajectory
+   - **Requires minimum 0.2 drop from backswing start** to avoid jitter detection
+   - Validates with movement after the trough
+
+4. **Impact Detection**
+   - Finds first peak in wrist Y after top of backswing
+   - Represents the point where wrist rises back up through the ball
+
+5. **Finish Detection**
+   - Monitors wrist speed after impact
+   - Finish when speed drops below 12% of peak for 12+ consecutive frames
+
+### Data Processing
+- Savitzky-Golay smoothing for noise reduction
+- Forward/backward fill for missing data
+- Normalized metrics using torso length as reference
 
 ## 🐛 Troubleshooting
 
@@ -217,51 +236,26 @@ IDEAL_TEMPO_RATIO = 3.0  # Ideal backswing:downswing
 ## 🎓 Academic Context
 
 This is a final year project for Computer Science at the University of Birmingham. The system demonstrates:
-- Computer vision applications
-- Real-time pose estimation
-- Biomechanical analysis
-- Data visualization
-- Software engineering best practices
+- Computer vision applications in sports analysis
+- Real-time pose estimation techniques
+- Biomechanical analysis algorithms
+- Signal processing for motion analysis
+- Interactive data visualization
+- Full-stack application development
 
 ## 🔮 Future Enhancements
 
 Potential improvements for future versions:
+- [ ] Club detection using GolfPose (HRNet + YOLOX) for more accurate impact detection
+- [ ] 3D pose estimation integration (CoMotion/SMPL)
 - [ ] Real-time webcam analysis
-- [ ] Multiple golfer comparison
-- [ ] Club face angle estimation
+- [ ] Multiple swing comparison
 - [ ] Hip/shoulder rotation analysis
-- [ ] DTW-based pro comparison
-- [ ] Machine learning swing classification
+- [ ] Pro swing comparison using DTW
 - [ ] Mobile app version
-- [ ] Database for historical tracking
-- [ ] Slow-motion playback with annotations
-- [ ] Export to PDF reports
-
+- [ ] Historical tracking database
+- [ ] PDF report generation
 ## 📝 Code Quality Improvements
-
-This improved version includes:
-
-### From Original Code
-- ✅ Fixed hardcoded values
-- ✅ Added proper error handling
-- ✅ Improved swing path calculation
-- ✅ Better phase detection
-- ✅ Used overlay video in UI
-- ✅ Added comprehensive documentation
-
-### New Features
-- ✅ Configuration file for all constants
-- ✅ Type hints throughout
-- ✅ Comprehensive error messages
-- ✅ Data validation
-- ✅ Linear interpolation for missing data
-- ✅ Speed and acceleration metrics
-- ✅ 3D trajectory visualization
-- ✅ Improved UI with tabs and metrics
-- ✅ Download capabilities
-- ✅ Progress indicators
-- ✅ Better color schemes
-- ✅ Professional formatting
 
 ## 📄 License
 
