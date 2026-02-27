@@ -12,36 +12,39 @@ from pose_tracking import extract_pose
 from swing_analysis import analyze_swing
 from visualisation import (
     plot_wrist_timeline,
-    plot_hand_path,
     plot_tempo,
     plot_speed_profile,
     plot_overall_score
 )
 
-# Fixed club type (no user selection)
-DEFAULT_CLUB_TYPE = "iron"
-
-
+# ----------------------------
+# Frame extraction helpers
+# ----------------------------
 def extract_phase_frames(video_path, df):
     """Extract frames at detected swing phases."""
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
 
-    address_frame = int(df["address_idx"].iloc[0]) if "address_idx" in df.columns else 0
-    top_frame = int(df["backswing_top_idx"].iloc[0]) if "backswing_top_idx" in df.columns else address_frame
-    impact_frame = int(df["impact_idx"].iloc[0]) if "impact_idx" in df.columns else top_frame
-    finish_frame = int(df["finish_idx"].iloc[0]) if "finish_idx" in df.columns else (len(df) - 1)
+    # Safe reads
+    def get_idx(col, default=0):
+        try:
+            return int(df[col].iloc[0]) if col in df.columns else int(default)
+        except Exception:
+            return int(default)
+
+    address_frame = get_idx("address_idx", 0)
 
     phases = {
         "Address": address_frame,
-        "Top of Backswing": int(df["backswing_top_idx"].iloc[0]),
-        "Impact": int(df["impact_idx"].iloc[0]),
-        "Finish": int(df["finish_idx"].iloc[0]),
+        "Top of Backswing": get_idx("backswing_top_idx", address_frame),
+        "Impact": get_idx("impact_idx", address_frame),
+        "Finish": get_idx("finish_idx", len(df) - 1),
     }
 
     frames = {}
     for phase_name, frame_idx in phases.items():
+        frame_idx = max(0, frame_idx)
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if ret:
@@ -53,20 +56,26 @@ def extract_phase_frames(video_path, df):
 
 
 def extract_phase_frames_with_skeleton(video_path, df):
-    """Extract frames at detected swing phases with skeleton overlay."""
+    """Extract phase frames with skeleton overlay."""
     import mediapipe as mp
 
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         return None
 
-    address_frame = int(df["address_idx"].iloc[0]) if "address_idx" in df.columns else int(df["backswing_start_idx"].iloc[0])
+    def get_idx(col, default=0):
+        try:
+            return int(df[col].iloc[0]) if col in df.columns else int(default)
+        except Exception:
+            return int(default)
+
+    address_frame = get_idx("address_idx", 0)
 
     phases = {
-        "Start of backswing": address_frame,
-        "Top of Backswing": int(df["backswing_top_idx"].iloc[0]),
-        "Impact": int(df["impact_idx"].iloc[0]),
-        "Finish": int(df["finish_idx"].iloc[0]),
+        "Address": address_frame,
+        "Top of Backswing": get_idx("backswing_top_idx", address_frame),
+        "Impact": get_idx("impact_idx", address_frame),
+        "Finish": get_idx("finish_idx", len(df) - 1),
     }
 
     mp_pose = mp.solutions.pose
@@ -81,6 +90,7 @@ def extract_phase_frames_with_skeleton(video_path, df):
     ) as pose:
 
         for phase_name, frame_idx in phases.items():
+            frame_idx = max(0, frame_idx)
             cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
             ret, frame = cap.read()
 
@@ -109,23 +119,18 @@ def extract_phase_frames_with_skeleton(video_path, df):
 # ----------------------------
 st.set_page_config(page_title="Golf Swing Analyzer", layout="wide")
 
-st.markdown(
-    """
+st.markdown("""
 <div style="text-align:center;">
     <h1 style="font-size:42px;">🏌️ Golf Swing Analyzer</h1>
 </div>
-""",
-    unsafe_allow_html=True
-)
+""", unsafe_allow_html=True)
 
-# Ensure Data folder exists
 os.makedirs(os.path.join("..", "Data"), exist_ok=True)
 DATA_DIR = os.path.abspath(os.path.join("..", "Data"))
 
 uploaded = st.file_uploader("Upload your swing video (MP4)", type=["mp4", "mov", "avi"])
 
 if uploaded:
-    # Save uploaded file
     tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     tfile.write(uploaded.read())
     tfile.flush()
@@ -151,8 +156,8 @@ if uploaded:
 
     df = pd.DataFrame(pose_rows)
 
-    # Analyze swing with fixed club type
-    df = analyze_swing(df, club_type=DEFAULT_CLUB_TYPE)
+    # Run analysis
+    df = analyze_swing(df, debug=False)
 
     # Save CSV
     csv_out = os.path.join(DATA_DIR, "player_swing_analysis.csv")
@@ -160,16 +165,14 @@ if uploaded:
 
     st.success("✅ Analysis complete!")
 
-    # Data type indicator
-    has_3d = df["has_3d_data"].iloc[0] if "has_3d_data" in df.columns else False
+    has_3d = bool(df["has_3d_data"].iloc[0]) if "has_3d_data" in df.columns else False
     st.info(f"📊 Using {'3D pose data' if has_3d else '2D pose data (MediaPipe)'}")
 
     # ----------------------------
-    # RESULTS SECTION
+    # Results
     # ----------------------------
     st.header("🎯 Swing Analysis Results")
 
-    # Overall Score (prominent display)
     col1, col2, col3 = st.columns([1, 2, 1])
     with col2:
         score = int(df["overall_score"].iloc[0]) if "overall_score" in df.columns else 0
@@ -184,20 +187,17 @@ if uploaded:
         else:
             score_color = "red"
 
-        st.markdown(
-            f"""
+        st.markdown(f"""
         <div style="text-align:center; padding:20px; background-color:#f0f2f6; border-radius:10px;">
             <h1 style="color:{score_color}; margin:0;">{score}/100</h1>
             <h3 style="margin:0;">{rating}</h3>
         </div>
-        """,
-            unsafe_allow_html=True
-        )
+        """, unsafe_allow_html=True)
 
     st.markdown("---")
 
     # ----------------------------
-    # PHASE FRAMES DISPLAY
+    # Phase frames
     # ----------------------------
     st.subheader("🎬 Swing Phases Visualization")
 
@@ -222,37 +222,39 @@ if uploaded:
 
     st.markdown("---")
 
-    # Phase Detection
+    # ----------------------------
+    # Phase indices
+    # ----------------------------
     st.subheader("📍 Phase Detection")
     col1, col2, col3, col4 = st.columns(4)
 
-    address_frame = int(df["address_idx"].iloc[0]) if "address_idx" in df.columns else int(df["backswing_start_idx"].iloc[0])
+    def gi(name, default=0):
+        return int(df[name].iloc[0]) if name in df.columns else int(default)
 
     with col1:
-        st.metric("Address", f"Frame {address_frame}")
+        st.metric("Address", f"Frame {gi('address_idx')}")
     with col2:
-        st.metric("Top of Backswing", f"Frame {int(df['backswing_top_idx'].iloc[0])}")
+        st.metric("Top of Backswing", f"Frame {gi('backswing_top_idx')}")
     with col3:
-        st.metric("Impact", f"Frame {int(df['impact_idx'].iloc[0])}")
+        st.metric("Impact", f"Frame {gi('impact_idx')}")
         if "impact_raw_idx" in df.columns:
-            st.caption(f"(Raw: {int(df['impact_raw_idx'].iloc[0])})")
+            st.caption(f"(Raw: {gi('impact_raw_idx')})")
     with col4:
-        st.metric("Finish", f"Frame {int(df['finish_idx'].iloc[0])}")
+        st.metric("Finish", f"Frame {gi('finish_idx')}")
 
     st.markdown("---")
 
-    # Metrics in columns
-    col1, col2 = st.columns(2)
+    # ----------------------------
+    # Metrics
+    # ----------------------------
+    c1, c2 = st.columns(2)
 
-    with col1:
+    with c1:
         st.subheader("⏱️ Tempo")
         tempo_ratio = df["tempo_ratio"].iloc[0] if "tempo_ratio" in df.columns else None
         st.metric("Tempo Ratio", f"{tempo_ratio}:1" if tempo_ratio is not None else "N/A")
-
-        if "backswing_frames" in df.columns:
-            st.write(f"Backswing: {int(df['backswing_frames'].iloc[0])} frames")
-        if "downswing_frames" in df.columns:
-            st.write(f"Downswing: {int(df['downswing_frames'].iloc[0])} frames")
+        st.write(f"Backswing: {gi('backswing_frames')} frames")
+        st.write(f"Downswing: {gi('downswing_frames')} frames")
 
         if tempo_ratio is not None:
             if 2.0 <= float(tempo_ratio) <= 3.5:
@@ -262,13 +264,14 @@ if uploaded:
             else:
                 st.warning("⚠️ Slow downswing - try accelerating")
 
-        st.subheader("🖐️ Hand Path")
-        if "hand_path_steepness" in df.columns:
-            st.metric("Steepness Ratio", f"{float(df['hand_path_steepness'].iloc[0]):.2f}")
-        if "hand_path_label" in df.columns:
-            st.write(f"Classification: **{df['hand_path_label'].iloc[0]}**")
+        st.subheader("🏋️ Early Extension (Side-view proxy)")
+        if "early_extension_score" in df.columns:
+            st.metric("Early Extension Score", f"{gi('early_extension_score')}/100")
+            st.write(f"Assessment: **{df['early_extension_label'].iloc[0]}**")
+        else:
+            st.write("N/A")
 
-    with col2:
+    with c2:
         st.subheader("💪 Arm Extension")
         if "elbow_angle_impact" in df.columns and pd.notna(df["elbow_angle_impact"].iloc[0]):
             st.metric("Elbow Angle at Impact", f"{float(df['elbow_angle_impact'].iloc[0]):.1f}°")
@@ -278,22 +281,20 @@ if uploaded:
 
         st.subheader("⚡ Speed Timing")
         if "max_speed_frame" in df.columns:
-            st.write(f"Max Speed Frame: {int(df['max_speed_frame'].iloc[0])}")
-        if "impact_idx" in df.columns:
-            st.write(f"Impact Frame: {int(df['impact_idx'].iloc[0])}")
+            st.write(f"Max Speed Frame: {gi('max_speed_frame')}")
+        st.write(f"Impact Frame: {gi('impact_idx')}")
         if "speed_timing" in df.columns:
             st.write(f"Assessment: **{df['speed_timing'].iloc[0]}**")
 
     st.markdown("---")
 
     # ----------------------------
-    # Visualizations
+    # Plots
     # ----------------------------
     st.header("📈 Visualizations")
 
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "Wrist Timeline",
-        "Hand Path",
         "Tempo",
         "Speed Profile",
         "Score Breakdown"
@@ -304,22 +305,17 @@ if uploaded:
         st.pyplot(fig1)
 
     with tab2:
-        fig2 = plot_hand_path(df)
+        fig2 = plot_tempo(df)
         st.pyplot(fig2)
 
     with tab3:
-        fig3 = plot_tempo(df)
+        fig3 = plot_speed_profile(df)
         st.pyplot(fig3)
 
     with tab4:
-        fig4 = plot_speed_profile(df)
+        fig4 = plot_overall_score(df)
         st.pyplot(fig4)
 
-    with tab5:
-        fig5 = plot_overall_score(df)
-        st.pyplot(fig5)
-
-    # Download CSV
     st.markdown("---")
     with open(csv_out, "rb") as fh:
         st.download_button(
@@ -333,19 +329,16 @@ if uploaded:
 
 else:
     st.info("👆 Upload a swing video to get started.")
-
-    st.markdown(
-        """
+    st.markdown("""
 ### How it works:
-1. Upload a video of your golf swing (side view)
-2. The app extracts pose landmarks
+1. Upload a side-view video of your golf swing (right-handed golfer, camera on right side)
+2. The app extracts pose landmarks (MediaPipe)
 3. Key swing phases are detected automatically
-4. You get metrics on tempo, hand path, arm extension, and speed timing
+4. You get metrics: tempo, arm extension, speed timing, and early extension risk
 
 ### Tips for best results:
-- Use a side-on camera angle
+- Keep the camera fixed (tripod if possible)
 - Ensure full body is visible throughout the swing
-- Good lighting helps with pose detection
-- Make sure there is an address period
-"""
-    )
+- Good lighting helps pose tracking
+- Include a short address setup before swinging
+""")
