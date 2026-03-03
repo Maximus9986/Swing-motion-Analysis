@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
+import cv2
 from scipy.signal import find_peaks, savgol_filter
-
+from ultralytics import YOLO
 
 # -----------------------------
 # Helpers
@@ -52,7 +53,85 @@ def _dist2d(ax, ay, bx, by):
 
 def _clamp01(x):
     return float(max(0.0, min(1.0, x)))
+def extract_clubhead_y_from_yolo(video_path, model_path, conf=0.25, clubhead_kpt_idx=0):
+    """
+    Returns a DataFrame with per-frame clubhead y (pixels):
+    columns: frame, clubhead_y, clubhead_valid
+    - If model is YOLO-pose: uses keypoints[clubhead_kpt_idx]
+    - Else: fallback uses bottom of bbox (y2)
+    """
+    model = YOLO(model_path)
 
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError(f"Cannot open video: {video_path}")
+
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    rows = []
+    f = 0
+
+    while True:
+        ok, frame = cap.read()
+        if not ok:
+            break
+
+        res = model.predict(frame, conf=conf, verbose=False)[0]
+
+        y_val = np.nan
+        valid = 0
+
+        # Pose keypoints path
+        if res.keypoints is not None and len(res.keypoints) > 0 and res.boxes is not None and len(res.boxes) > 0:
+            best = int(np.argmax(res.boxes.conf.cpu().numpy()))
+            kpts = res.keypoints.xy[best].cpu().numpy()  # (K,2)
+            if clubhead_kpt_idx < len(kpts):
+                y_val = float(kpts[clubhead_kpt_idx, 1])
+                valid = 1
+
+        # bbox fallback path
+        elif res.boxes is not None and len(res.boxes) > 0:
+            best = int(np.argmax(res.boxes.conf.cpu().numpy()))
+            box = res.boxes.xyxy[best].cpu().numpy()
+            y_val = float(box[3])  # y2 bottom
+            valid = 1
+
+        rows.append({"frame": f, "clubhead_y": y_val, "clubhead_valid": valid})
+        f += 1
+
+        if f % 50 == 0:
+            print(f"YOLO processed {f}/{total} frames...")
+
+    cap.release()
+    return pd.DataFrame(rows)
+
+def refine_impact_with_club_y(impact_wrist, club_y, club_valid=None, window=5):
+    """
+    Refine a wrist-based impact frame using clubhead Y around it.
+    Picks the LOWEST clubhead point (max y) within +/- window frames.
+
+    club_y: np.array length N (NaNs allowed)
+    club_valid: np.array length N of 0/1 (optional). If None, valid = ~isnan(club_y).
+    """
+    n = len(club_y)
+    c = int(np.clip(impact_wrist, 0, n - 1))
+
+    lo = max(0, c - window)
+    hi = min(n, c + window + 1)
+
+    seg = club_y[lo:hi]
+
+    if club_valid is None:
+        seg_valid = ~np.isnan(seg)
+        idxs = np.where(seg_valid)[0]
+    else:
+        seg_valid = np.asarray(club_valid[lo:hi]).astype(int)
+        idxs = np.where(seg_valid == 1)[0]
+
+    if len(idxs) == 0:
+        return impact_wrist, "wrist_only"
+
+    best_off = int(idxs[np.argmax(seg[idxs])])  # max y => lowest on screen
+    return int(lo + best_off), "yolo_refine_pm5"
 
 # -----------------------------
 # Early Extension (Side-view proxy)
@@ -60,8 +139,8 @@ def _clamp01(x):
 def compute_early_extension(df, address_idx, impact_idx, debug=False):
     """
     Early extension proxy (side view):
-      - hip drift (x) from address->impact
-      - hip rise (y) from address->impact
+    - hip drift (x) from address->impact
+    - hip rise (y) from address->impact
     Normalized by torso length at address (shoulder->hip).
     Returns (score 0..100, label, debug_dict)
     """
@@ -126,45 +205,21 @@ def compute_early_extension(df, address_idx, impact_idx, debug=False):
 # Main analysis
 # -----------------------------
 def analyze_swing(df, fps=None, debug=False):
-    """
-    Swing analysis pipeline (side-view friendly).
-    Produces these columns safely (always exists):
-      - address_idx
-      - backswing_start_idx
-      - backswing_top_idx
-      - impact_raw_idx
-      - impact_idx
-      - finish_idx
-      - backswing_frames, downswing_frames, tempo_ratio, follow_through_frames
-      - elbow_angle_impact, arm_extension_label
-      - max_wrist_speed, max_speed_frame, speed_timing, speed_timing_score
-      - early_extension_score, early_extension_label
-      - overall_score, overall_rating
-      - has_3d_data
-    """
-
     if df is None or df.empty:
         return pd.DataFrame()
 
     df = df.copy()
 
-    # Always create phase columns so Streamlit never KeyErrors
+    # Safe defaults (so Streamlit never KeyErrors)
     df["address_idx"] = 0
     df["backswing_start_idx"] = 0
     df["backswing_top_idx"] = 0
     df["impact_raw_idx"] = 0
     df["impact_idx"] = 0
     df["finish_idx"] = max(len(df) - 1, 0)
+    df["impact_method"] = "unset"  # ✅ prevents UnboundLocalError
 
-    # -----------------------------
-    # 0) Determine if 3D
-    # -----------------------------
-    has_3d = ("wrist_z" in df.columns) or ("wrist_z_smooth" in df.columns)
-    df["has_3d_data"] = bool(has_3d)
-
-    # -----------------------------
-    # 1) Smooth coordinates
-    # -----------------------------
+    # Smooth wrist coords (expects wrist_x/wrist_y exist)
     for joint in ["wrist", "elbow", "shoulder", "hip"]:
         for axis in ["x", "y", "z"]:
             col = f"{joint}_{axis}"
@@ -323,34 +378,42 @@ def analyze_swing(df, fps=None, debug=False):
         print("DEBUG backswing_top:", backswing_top, "y_top:", float(y[backswing_top]), "drop:", y_at_start - float(y[backswing_top]))
 
     # -----------------------------
-    # 4) Impact detection (closest return to address_y after top)
+    # 4) Impact detection (wrist + optional YOLO refine)
     # -----------------------------
     search_start = int(backswing_top)
-    search_end = int(min(backswing_top + 120, n))  # allow enough frames
-
+    search_end = int(min(backswing_top + 120, n))
     post = y[search_start:search_end]
 
-    # Find peaks in post-top segment (peaks in wrist_y)
     seg_range = float(np.nanmax(post) - np.nanmin(post))
-    prom = 0.12 * max(seg_range, 1e-6)  # tune 0.10~0.20 if needed
-
-    peaks, props = find_peaks(
-        post,
-        prominence=prom,
-        distance=8
-    )
+    prom = 0.12 * max(seg_range, 1e-6)
+    peaks, _ = find_peaks(post, prominence=prom, distance=8)
 
     if len(peaks) > 0:
-        # "next peak after top"
-        impact_raw = int(search_start + peaks[0])
+        impact_wrist = int(search_start + peaks[0])
     else:
-        # fallback: choose biggest rise point (max y) in window
-        impact_raw = int(search_start + int(np.nanargmax(post)))
+        impact_wrist = int(search_start + int(np.nanargmax(post)))
 
-    impact = int(min(max(impact_raw, 0), n - 1))
+    impact = int(impact_wrist)
+    impact_method = "wrist"
 
-    df["impact_raw_idx"] = int(impact_raw)
+    # YOLO refine if columns exist
+    if "clubhead_y_smooth" in df.columns:
+        club_y = df["clubhead_y_smooth"].values.astype(float)
+        club_valid = df["clubhead_valid"].values.astype(int) if "clubhead_valid" in df.columns else None
+        impact, impact_method = refine_impact_with_club_y(impact_wrist, club_y, club_valid, window=5)
+
+    df["impact_raw_idx"] = int(impact_wrist)
     df["impact_idx"] = int(impact)
+    df["impact_method"] = impact_method
+
+    # -----------------------------
+    # Keep YOUR existing scoring/metrics after this
+    # (tempo, elbow angle, speed timing, early extension, overall_score...)
+    # -----------------------------
+    # ✅ IMPORTANT: Paste your original scoring code below this line unchanged.
+    # If you already have it in your file, just leave it as-is.
+
+    return df
     # -----------------------------
     # 5) Arm extension at impact (elbow angle)
     # -----------------------------
