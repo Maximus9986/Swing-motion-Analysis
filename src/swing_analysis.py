@@ -210,21 +210,31 @@ def analyze_swing(df, fps=None, debug=False):
 
     df = df.copy()
 
-    # Safe defaults (so Streamlit never KeyErrors)
+    # -----------------------------
+    # Safe defaults (never KeyError)
+    # -----------------------------
     df["address_idx"] = 0
     df["backswing_start_idx"] = 0
     df["backswing_top_idx"] = 0
     df["impact_raw_idx"] = 0
     df["impact_idx"] = 0
     df["finish_idx"] = max(len(df) - 1, 0)
-    df["impact_method"] = "unset"  # ✅ prevents UnboundLocalError
+    df["impact_method"] = "unset"
 
-    # Smooth wrist coords (expects wrist_x/wrist_y exist)
+    # -----------------------------
+    # 0) 3D check
+    # -----------------------------
+    has_3d = ("wrist_z" in df.columns) or ("wrist_z_smooth" in df.columns)
+    df["has_3d_data"] = bool(has_3d)
+
+    # -----------------------------
+    # 1) Smooth joints
+    # -----------------------------
     for joint in ["wrist", "elbow", "shoulder", "hip"]:
         for axis in ["x", "y", "z"]:
             col = f"{joint}_{axis}"
             if col in df.columns:
-                df[f"{col}_smooth"] = _safe_savgol(df[col].values, default_window=7, poly=2)
+                df[f"{col}_smooth"] = _safe_savgol(df[col].values)
 
     if "wrist_y_smooth" not in df.columns:
         df["error"] = "Missing wrist_y"
@@ -234,386 +244,149 @@ def analyze_swing(df, fps=None, debug=False):
     n = len(y)
 
     # -----------------------------
-    # 2) Address + backswing start detection
+    # 2) Address + backswing start
     # -----------------------------
     def detect_address_and_backswing_start(yvals):
-        yvals = np.asarray(yvals, dtype=float)
         n_ = len(yvals)
         if n_ < 30:
-            address_mean = float(np.nanmean(yvals[: min(10, n_)]))
-            return 0, 0, min(10, n_ - 1), address_mean
+            return 0, 0
 
         total_range = np.nanpercentile(yvals, 95) - np.nanpercentile(yvals, 5)
-        total_range = max(float(total_range), 1e-6)
+        total_range = max(total_range, 1e-6)
 
-        # >>> Your rule: if swing never drops enough, don't treat it as backswing <<<
-        # Using absolute minimum drop threshold (0.2) as you requested
-        MIN_TOTAL_DROP = 0.2
-        significant_drop = max(0.30 * total_range, MIN_TOTAL_DROP)
-
-        win = 20
-        rs = _rolling_std(yvals, win=win)
-
-        max_search = min(n_ // 2, 250)
-        stability_threshold = 0.06 * total_range
-        min_len = 12
-
-        stable_segments = []
-        start = None
-        length = 0
-        for i in range(win, max_search):
-            if rs[i] < stability_threshold:
-                if start is None:
-                    start = i
-                length += 1
-            else:
-                if start is not None and length >= min_len:
-                    stable_segments.append((start, i - 1, length))
-                start = None
-                length = 0
-
-        if start is not None and length >= min_len:
-            stable_segments.append((start, max_search - 1, length))
-
-        if stable_segments:
-            stable_segments.sort(key=lambda t: t[2], reverse=True)
-            s0, s1, _ = stable_segments[0]
-        else:
-            s0, s1 = 0, min(20, max_search - 1)
-
-        address_mean = float(np.nanmean(yvals[s0:s1 + 1]))
-
+        MIN_DROP = 0.2
         local_drop = 0.02 * total_range
-        confirm_window = 40
 
-        for i in range(s1, min(s1 + 80, n_ - confirm_window - 1)):
-            if yvals[i] < address_mean - local_drop:
-                future_min = float(np.nanmin(yvals[i:i + confirm_window]))
-                # require big enough drop (>= significant_drop, which is >= 0.2)
-                if (address_mean - future_min) >= significant_drop:
-                    backswing_start = max(i - 5, s1)
-                    return s0, backswing_start, s1, address_mean
+        address = 0
+        for i in range(20, min(200, n_ - 40)):
+            if yvals[i] < yvals[address] - local_drop:
+                if yvals[address] - np.nanmin(yvals[i:i + 40]) >= MIN_DROP:
+                    return address, max(0, i - 5)
+        return 0, 0
 
-        # fallback: negative slope streak
-        dy = np.diff(yvals)
-        for i in range(20, min(250, len(dy) - 6)):
-            if np.all(dy[i:i + 6] < -0.01 * total_range):
-                backswing_start = i
-                return s0, backswing_start, s1, address_mean
-
-        return s0, 0, s1, address_mean
-
-    address_idx, backswing_start, address_end, address_y = detect_address_and_backswing_start(y)
-
+    address_idx, backswing_start = detect_address_and_backswing_start(y)
     df["address_idx"] = int(address_idx)
     df["backswing_start_idx"] = int(backswing_start)
 
-    if debug:
-        print("DEBUG address_idx:", address_idx, "backswing_start:", backswing_start, "address_y:", address_y)
-
     # -----------------------------
-    # 3) Top of backswing detection (your tuned + drop threshold)
+    # 3) Top of backswing
     # -----------------------------
-    if backswing_start >= n - 5:
-        df["error"] = "Backswing start too late"
-        return df
+    segment = y[backswing_start: backswing_start + min(140, n - backswing_start)]
+    troughs, _ = find_peaks(-segment, prominence=0.15 * np.ptp(segment))
 
-    search_window = min(140, n - backswing_start - 1)  # allow slower swings
-    segment = y[backswing_start: backswing_start + search_window]
-
-    seg_range = float(np.nanmax(segment) - np.nanmin(segment))
-    prom = 0.15 * max(seg_range, 1e-6)
-
-    troughs, _ = find_peaks(-segment, prominence=prom, distance=8)
-
-    MIN_DROP_FROM_START = 0.2  # your rule
-    LOOKAHEAD = 25
-
-    y_at_start = float(y[backswing_start])
-    backswing_top = None
-
-    if len(troughs) > 0:
-        for t in troughs:
-            trough_idx = int(backswing_start + t)
-            y_at_trough = float(y[trough_idx])
-            drop_from_start = y_at_start - y_at_trough
-
-            if drop_from_start < MIN_DROP_FROM_START:
-                continue
-
-            j = min(t + LOOKAHEAD, len(segment) - 1)
-            move_after = float(np.nanmax(segment[t:j+1]) - np.nanmin(segment[t:j+1]))
-            if move_after >= 0.1:
-                backswing_top = trough_idx
-                break
-
-    # fallback: deepest valid trough
-    if backswing_top is None and len(troughs) > 0:
-        valid = []
-        for t in troughs:
-            trough_idx = int(backswing_start + t)
-            drop_from_start = y_at_start - float(y[trough_idx])
-            if drop_from_start >= MIN_DROP_FROM_START:
-                valid.append(t)
-
-        if valid:
-            best = int(valid[np.argmin([segment[t] for t in valid])])
-            backswing_top = int(backswing_start + best)
-
-    # fallback: absolute min IF meets drop requirement else backswing_start
-    if backswing_top is None:
-        min_idx = int(np.nanargmin(segment))
-        y_at_min = float(segment[min_idx])
-        drop_from_start = y_at_start - y_at_min
-        if drop_from_start >= MIN_DROP_FROM_START:
-            backswing_top = int(backswing_start + min_idx)
-        else:
-            backswing_top = int(backswing_start)
-            if debug:
-                print(f"WARNING: No valid backswing top (drop<{MIN_DROP_FROM_START})")
+    if len(troughs):
+        backswing_top = backswing_start + troughs[0]
+    else:
+        backswing_top = backswing_start + int(np.nanargmin(segment))
 
     df["backswing_top_idx"] = int(backswing_top)
 
-    if debug:
-        print("DEBUG backswing_top:", backswing_top, "y_top:", float(y[backswing_top]), "drop:", y_at_start - float(y[backswing_top]))
-
     # -----------------------------
-    # 4) Impact detection (wrist + optional YOLO refine)
+    # 4) Impact (WRIST → YOLO refine)
     # -----------------------------
-    search_start = int(backswing_top)
-    search_end = int(min(backswing_top + 120, n))
-    post = y[search_start:search_end]
+    post = y[backswing_top: min(backswing_top + 120, n)]
+    peaks, _ = find_peaks(post, prominence=0.12 * np.ptp(post))
 
-    seg_range = float(np.nanmax(post) - np.nanmin(post))
-    prom = 0.12 * max(seg_range, 1e-6)
-    peaks, _ = find_peaks(post, prominence=prom, distance=8)
-
-    if len(peaks) > 0:
-        impact_wrist = int(search_start + peaks[0])
+    if len(peaks):
+        impact_wrist = backswing_top + peaks[0]
     else:
-        impact_wrist = int(search_start + int(np.nanargmax(post)))
+        impact_wrist = backswing_top + int(np.nanargmax(post))
 
     impact = int(impact_wrist)
     impact_method = "wrist"
 
-    # YOLO refine if columns exist
     if "clubhead_y_smooth" in df.columns:
         club_y = df["clubhead_y_smooth"].values.astype(float)
         club_valid = df["clubhead_valid"].values.astype(int) if "clubhead_valid" in df.columns else None
-        impact, impact_method = refine_impact_with_club_y(impact_wrist, club_y, club_valid, window=5)
+        impact, impact_method = refine_impact_with_club_y(
+            impact_wrist, club_y, club_valid, window=5
+        )
 
     df["impact_raw_idx"] = int(impact_wrist)
     df["impact_idx"] = int(impact)
     df["impact_method"] = impact_method
 
     # -----------------------------
-    # Keep YOUR existing scoring/metrics after this
-    # (tempo, elbow angle, speed timing, early extension, overall_score...)
+    # 5) Elbow angle
     # -----------------------------
-    # ✅ IMPORTANT: Paste your original scoring code below this line unchanged.
-    # If you already have it in your file, just leave it as-is.
-
-    return df
-    # -----------------------------
-    # 5) Arm extension at impact (elbow angle)
-    # -----------------------------
-    needed = all(c in df.columns for c in [
+    elbow_angle = None
+    if all(c in df.columns for c in [
         "shoulder_x_smooth", "shoulder_y_smooth",
         "elbow_x_smooth", "elbow_y_smooth",
         "wrist_x_smooth", "wrist_y_smooth"
-    ])
-
-    elbow_angle = None
-    if needed:
-        if has_3d and all(c in df.columns for c in ["shoulder_z_smooth", "elbow_z_smooth", "wrist_z_smooth"]):
-            shoulder = [df.loc[impact, "shoulder_x_smooth"], df.loc[impact, "shoulder_y_smooth"], df.loc[impact, "shoulder_z_smooth"]]
-            elbow    = [df.loc[impact, "elbow_x_smooth"],    df.loc[impact, "elbow_y_smooth"],    df.loc[impact, "elbow_z_smooth"]]
-            wrist    = [df.loc[impact, "wrist_x_smooth"],    df.loc[impact, "wrist_y_smooth"],    df.loc[impact, "wrist_z_smooth"]]
-        else:
-            shoulder = [df.loc[impact, "shoulder_x_smooth"], df.loc[impact, "shoulder_y_smooth"], 0.0]
-            elbow    = [df.loc[impact, "elbow_x_smooth"],    df.loc[impact, "elbow_y_smooth"],    0.0]
-            wrist    = [df.loc[impact, "wrist_x_smooth"],    df.loc[impact, "wrist_y_smooth"],    0.0]
-
+    ]):
+        shoulder = [df.loc[impact, "shoulder_x_smooth"], df.loc[impact, "shoulder_y_smooth"], 0]
+        elbow    = [df.loc[impact, "elbow_x_smooth"],    df.loc[impact, "elbow_y_smooth"],    0]
+        wrist    = [df.loc[impact, "wrist_x_smooth"],    df.loc[impact, "wrist_y_smooth"],    0]
         elbow_angle = _angle(shoulder, elbow, wrist)
 
-        if elbow_angle > 155:
-            arm_label = "Excellent (fully extended)"
-        elif elbow_angle > 140:
-            arm_label = "Good (slight bend is normal)"
-        elif elbow_angle > 125:
-            arm_label = "Moderate"
-        else:
-            arm_label = "Needs improvement (chicken wing)"
-
-        df["elbow_angle_impact"] = float(elbow_angle)
-        df["arm_extension_label"] = arm_label
-    else:
-        df["elbow_angle_impact"] = np.nan
-        df["arm_extension_label"] = "N/A (missing joint data)"
+    df["elbow_angle_impact"] = elbow_angle if elbow_angle else np.nan
+    df["arm_extension_label"] = (
+        "Excellent" if elbow_angle and elbow_angle > 155 else
+        "Good" if elbow_angle and elbow_angle > 140 else
+        "Moderate" if elbow_angle and elbow_angle > 125 else
+        "Needs improvement"
+    )
 
     # -----------------------------
     # 6) Wrist speed + timing
     # -----------------------------
-    fps_used = float(fps) if fps is not None else float(df.get("fps", pd.Series([30])).iloc[0] if "fps" in df.columns else 30.0)
-    if fps_used <= 0:
-        fps_used = 30.0
+    fps_used = fps if fps else 30.0
     dt = 1.0 / fps_used
 
-    wrist_x = df["wrist_x_smooth"].values.astype(float) if "wrist_x_smooth" in df.columns else None
-    wrist_y = df["wrist_y_smooth"].values.astype(float)
+    wx = df["wrist_x_smooth"].values
+    wy = df["wrist_y_smooth"].values
 
-    if wrist_x is None:
-        df["max_wrist_speed"] = 0.0
-        df["max_speed_frame"] = int(impact)
-        df["speed_timing"] = "N/A"
-        df["speed_timing_score"] = 0
-        df["max_speed_frames_from_impact"] = 0
-    else:
-        dx = np.diff(wrist_x) / dt
-        dy = np.diff(wrist_y) / dt
+    vel = np.sqrt(np.diff(wx)**2 + np.diff(wy)**2) / dt
+    seg = vel[backswing_top: min(impact + 8, len(vel))]
 
-        if has_3d and "wrist_z_smooth" in df.columns:
-            wz = df["wrist_z_smooth"].values.astype(float)
-            dz = np.diff(wz) / dt
-            velocity = np.sqrt(dx * dx + dy * dy + dz * dz)
-        else:
-            velocity = np.sqrt(dx * dx + dy * dy)
+    max_v_frame = backswing_top + int(np.nanargmax(seg)) if len(seg) else impact
+    frames_from_impact = max_v_frame - impact
 
-        downswing_start_idx = int(backswing_top)
-        downswing_end_idx = int(min(impact + 8, len(velocity)))
+    df["max_speed_frame"] = int(max_v_frame)
+    df["max_speed_frames_from_impact"] = int(frames_from_impact)
 
-        seg = velocity[downswing_start_idx:downswing_end_idx]
-        if len(seg) > 0:
-            max_v = float(np.nanmax(seg))
-            max_v_frame = int(downswing_start_idx + int(np.nanargmax(seg)))
-        else:
-            max_v = 0.0
-            max_v_frame = int(impact)
-
-        df["max_wrist_speed"] = max_v
-        df["max_speed_frame"] = max_v_frame
-
-        frames_from_impact = int(max_v_frame - impact)
-        abs_diff = abs(frames_from_impact)
-
-        if abs_diff <= 2:
-            speed_timing = "Excellent (max speed at impact)"
-            speed_score = 100
-        elif abs_diff <= 4:
-            speed_timing = "Good (max speed near impact)"
-            speed_score = 85
-        elif abs_diff <= 6:
-            speed_timing = "Moderate"
-            speed_score = 70
-        else:
-            speed_timing = "Early release" if frames_from_impact < 0 else "Late release"
-            speed_score = 50
-
-        df["speed_timing"] = speed_timing
-        df["speed_timing_score"] = int(speed_score)
-        df["max_speed_frames_from_impact"] = int(frames_from_impact)
+    df["speed_timing_score"] = (
+        100 if abs(frames_from_impact) <= 2 else
+        85 if abs(frames_from_impact) <= 4 else
+        70 if abs(frames_from_impact) <= 6 else
+        50
+    )
 
     # -----------------------------
     # 7) Tempo
     # -----------------------------
-    backswing_frames = int(max(backswing_top - backswing_start, 0))
-    downswing_frames = int(max(impact - backswing_top, 1))
-    tempo_ratio = round(backswing_frames / downswing_frames, 2) if downswing_frames > 0 else 0.0
+    backswing_frames = backswing_top - backswing_start
+    downswing_frames = max(impact - backswing_top, 1)
+    tempo_ratio = round(backswing_frames / downswing_frames, 2)
 
-    df["backswing_frames"] = backswing_frames
-    df["downswing_frames"] = downswing_frames
+    df["backswing_frames"] = int(backswing_frames)
+    df["downswing_frames"] = int(downswing_frames)
     df["tempo_ratio"] = tempo_ratio
 
     # -----------------------------
-    # 8) Finish detection (speed stabilisation)
+    # 8) Early extension
     # -----------------------------
-    finish = n - 1
-    try:
-        if wrist_x is not None:
-            vx = np.diff(wrist_x) / dt
-            vy = np.diff(wrist_y) / dt
-            speed = np.sqrt(vx * vx + vy * vy)
-            post = speed[min(impact, len(speed) - 1):]
-
-            if len(post) >= 20:
-                peak = float(np.nanmax(speed)) if len(speed) else 1.0
-                thresh = 0.12 * max(peak, 1e-6)
-                stable_len = 12
-                count = 0
-                for i_ in range(len(post)):
-                    if post[i_] < thresh:
-                        count += 1
-                        if count >= stable_len:
-                            finish = min(impact + i_, n - 1)
-                            break
-                    else:
-                        count = 0
-    except Exception:
-        finish = n - 1
-
-    df["finish_idx"] = int(finish)
-    df["follow_through_frames"] = int(max(finish - impact, 0))
-
-    # -----------------------------
-    # 9) Early Extension (replaces hand path)
-    # -----------------------------
-    ee_score, ee_label, ee_dbg = compute_early_extension(df, int(df["address_idx"].iloc[0]), int(df["impact_idx"].iloc[0]), debug=debug)
-    df["early_extension_score"] = int(ee_score)
+    ee_score, ee_label, _ = compute_early_extension(df, address_idx, impact)
+    df["early_extension_score"] = ee_score
     df["early_extension_label"] = ee_label
-    df["hip_dx_norm"] = float(ee_dbg.get("dx_norm", np.nan))
-    df["hip_dy_norm"] = float(ee_dbg.get("dy_norm", np.nan))
 
     # -----------------------------
-    # 10) Overall score (tempo + extension + speed timing + early extension)
+    # 9) Overall score
     # -----------------------------
     score = 0
-    max_score = 100  # fixed
 
-    # Tempo (25)
-    if 2.0 <= tempo_ratio <= 3.5:
-        score += 25
-    elif 1.5 <= tempo_ratio <= 4.0:
-        score += 18
-    else:
-        score += 10
+    score += 25 if 2.0 <= tempo_ratio <= 3.5 else 18 if 1.5 <= tempo_ratio <= 4.0 else 10
+    score += 25 if elbow_angle and elbow_angle > 155 else 18 if elbow_angle and elbow_angle > 140 else 10
+    score += int(df["speed_timing_score"].iloc[0] * 0.25)
+    score += 25 if ee_score <= 30 else 18 if ee_score <= 60 else 10
 
-    # Arm extension (25)
-    if elbow_angle is not None:
-        if elbow_angle > 155:
-            score += 25
-        elif elbow_angle > 140:
-            score += 22
-        elif elbow_angle > 125:
-            score += 15
-        else:
-            score += 8
-    else:
-        score += 12
-
-    # Speed timing (25)
-    speed_timing_score = int(df["speed_timing_score"].iloc[0]) if "speed_timing_score" in df.columns else 0
-    score += int(speed_timing_score * 0.25)
-
-    # Early extension (25) -> lower is better
-    if ee_score <= 30:
-        score += 25
-    elif ee_score <= 60:
-        score += 18
-    else:
-        score += 10
-
-    overall = int(round(score / max_score * 100))
-
-    if overall >= 85:
-        rating = "Excellent"
-    elif overall >= 70:
-        rating = "Good"
-    elif overall >= 55:
-        rating = "Average"
-    else:
-        rating = "Needs Work"
-
-    df["overall_score"] = int(overall)
-    df["overall_rating"] = rating
+    df["overall_score"] = int(score)
+    df["overall_rating"] = (
+        "Excellent" if score >= 85 else
+        "Good" if score >= 70 else
+        "Average" if score >= 55 else
+        "Needs Work"
+    )
 
     return df
