@@ -271,7 +271,7 @@ def analyze_swing(df, fps=None, debug=False):
     # -----------------------------
     # 3) Top of backswing 
     # -----------------------------
-    search_window = min(90, len(y) - backswing_start - 1)
+    search_window = min(n - backswing_start - 1, 500)
     segment = y[backswing_start : backswing_start + search_window]
 
     seg_range = float(np.max(segment) - np.min(segment))
@@ -374,6 +374,30 @@ def analyze_swing(df, fps=None, debug=False):
     df["impact_raw_idx"] = int(impact_wrist)
     df["impact_idx"] = int(impact)
     df["impact_method"] = impact_method
+    # -----------------------------
+    # 4.5) Finish detection (ROM based)
+    # -----------------------------
+    finish = n - 1
+
+    # Start searching a few frames after impact
+    START_OFFSET = 6
+    WINDOW = 10           # frames to check stability
+    STABLE_RANGE = 0.05   # wrist Y must stay within this range
+
+    start = min(impact + START_OFFSET, n - WINDOW - 1)
+
+    for i in range(start, n - WINDOW):
+        seg = y[i:i + WINDOW]
+
+        # range of wrist Y in this window
+        r = float(np.nanmax(seg) - np.nanmin(seg))
+
+        if r < STABLE_RANGE:
+            finish = i
+            break
+
+    df["finish_idx"] = int(finish)
+    df["follow_through_frames"] = int(max(finish - impact, 0))
 
     # -----------------------------
     # 5) Elbow angle
