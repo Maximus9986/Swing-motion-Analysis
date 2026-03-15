@@ -1,35 +1,14 @@
 import numpy as np
 import pandas as pd
-import cv2
-from scipy.signal import find_peaks, savgol_filter
-from ultralytics import YOLO
+from scipy.signal import find_peaks
+
+# Fix 1: Import shared helpers from club_tracking (single source of truth)
+from club_tracking import _safe_savgol, refine_impact_with_club_y
+
 
 # -----------------------------
-# Helpers
+# Helpers (swing-analysis specific)
 # -----------------------------
-def _safe_savgol(series, default_window=7, poly=2):
-    """
-    Safely apply Savitzky-Golay smoothing.
-    Handles short clips + NaNs.
-    """
-    s = pd.Series(series).astype(float).ffill().bfill()
-    n = len(s)
-    if n < 5:
-        return s.values
-
-    w = min(default_window, n)
-    if w % 2 == 0:
-        w -= 1
-    if w < 5:
-        return s.values
-
-    poly = min(poly, w - 1)
-    try:
-        return savgol_filter(s.values, window_length=w, polyorder=poly, mode="nearest")
-    except Exception:
-        return s.values
-
-
 def _angle(p1, p2, p3):
     """Angle at p2 formed by p1-p2-p3 (in degrees)."""
     v1 = np.array(p1) - np.array(p2)
@@ -53,85 +32,7 @@ def _dist2d(ax, ay, bx, by):
 
 def _clamp01(x):
     return float(max(0.0, min(1.0, x)))
-def extract_clubhead_y_from_yolo(video_path, model_path, conf=0.25, clubhead_kpt_idx=0):
-    """
-    Returns a DataFrame with per-frame clubhead y (pixels):
-    columns: frame, clubhead_y, clubhead_valid
-    - If model is YOLO-pose: uses keypoints[clubhead_kpt_idx]
-    - Else: fallback uses bottom of bbox (y2)
-    """
-    model = YOLO(model_path)
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
-
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    rows = []
-    f = 0
-
-    while True:
-        ok, frame = cap.read()
-        if not ok:
-            break
-
-        res = model.predict(frame, conf=conf, verbose=False)[0]
-
-        y_val = np.nan
-        valid = 0
-
-        # Pose keypoints path
-        if res.keypoints is not None and len(res.keypoints) > 0 and res.boxes is not None and len(res.boxes) > 0:
-            best = int(np.argmax(res.boxes.conf.cpu().numpy()))
-            kpts = res.keypoints.xy[best].cpu().numpy()  # (K,2)
-            if clubhead_kpt_idx < len(kpts):
-                y_val = float(kpts[clubhead_kpt_idx, 1])
-                valid = 1
-
-        # bbox fallback path
-        elif res.boxes is not None and len(res.boxes) > 0:
-            best = int(np.argmax(res.boxes.conf.cpu().numpy()))
-            box = res.boxes.xyxy[best].cpu().numpy()
-            y_val = float(box[3])  # y2 bottom
-            valid = 1
-
-        rows.append({"frame": f, "clubhead_y": y_val, "clubhead_valid": valid})
-        f += 1
-
-        if f % 50 == 0:
-            print(f"YOLO processed {f}/{total} frames...")
-
-    cap.release()
-    return pd.DataFrame(rows)
-
-def refine_impact_with_club_y(impact_wrist, club_y, club_valid=None, window=5):
-    """
-    Refine a wrist-based impact frame using clubhead Y around it.
-    Picks the LOWEST clubhead point (max y) within +/- window frames.
-
-    club_y: np.array length N (NaNs allowed)
-    club_valid: np.array length N of 0/1 (optional). If None, valid = ~isnan(club_y).
-    """
-    n = len(club_y)
-    c = int(np.clip(impact_wrist, 0, n - 1))
-
-    lo = max(0, c - window)
-    hi = min(n, c + window + 1)
-
-    seg = club_y[lo:hi]
-
-    if club_valid is None:
-        seg_valid = ~np.isnan(seg)
-        idxs = np.where(seg_valid)[0]
-    else:
-        seg_valid = np.asarray(club_valid[lo:hi]).astype(int)
-        idxs = np.where(seg_valid == 1)[0]
-
-    if len(idxs) == 0:
-        return impact_wrist, "wrist_only"
-
-    best_off = int(idxs[np.argmax(seg[idxs])])  # max y => lowest on screen
-    return int(lo + best_off), "yolo_refine_pm5"
 
 # -----------------------------
 # Early Extension (Side-view proxy)
@@ -269,7 +170,7 @@ def analyze_swing(df, fps=None, debug=False):
     df["backswing_start_idx"] = int(backswing_start)
 
     # -----------------------------
-    # 3) Top of backswing 
+    # 3) Top of backswing
     # -----------------------------
     search_window = min(n - backswing_start - 1, 500)
     segment = y[backswing_start : backswing_start + search_window]
@@ -283,11 +184,9 @@ def analyze_swing(df, fps=None, debug=False):
         distance=8
     )
 
-    # Minimum Y drop required from backswing_start to be considered valid backswing
     MIN_DROP_FROM_START = 0.35
     LOOKAHEAD = 25
 
-    # Y value at backswing start (address level)
     y_at_start = y[backswing_start]
 
     backswing_top = None
@@ -296,62 +195,57 @@ def analyze_swing(df, fps=None, debug=False):
         for t in troughs:
             trough_idx = backswing_start + t
             y_at_trough = y[trough_idx]
-            
-            # Check 1: Must have dropped at least MIN_DROP_FROM_START from start
+
             drop_from_start = y_at_start - y_at_trough
-            
+
             if drop_from_start < MIN_DROP_FROM_START:
-                # This trough hasn't dropped enough - likely just jitter
                 continue
-            
-            # Check 2: Must have significant movement after this point
+
             j = min(t + LOOKAHEAD, len(segment) - 1)
             move_after = float(np.max(segment[t:j+1]) - np.min(segment[t:j+1]))
 
-            if move_after >= 0.1:  # Some movement after the top
+            if move_after >= 0.1:
                 backswing_top = int(trough_idx)
                 break
 
-    # Fallback 1: Find deepest trough that meets minimum drop requirement
+    # Fallback 1: deepest valid trough
     if backswing_top is None and len(troughs) > 0:
         valid_troughs = []
         for t in troughs:
             trough_idx = backswing_start + t
             y_at_trough = y[trough_idx]
             drop_from_start = y_at_start - y_at_trough
-            
+
             if drop_from_start >= MIN_DROP_FROM_START:
                 valid_troughs.append(t)
-        
+
         if valid_troughs:
-            # Pick the deepest valid trough
             best = int(valid_troughs[np.argmin([segment[t] for t in valid_troughs])])
             backswing_top = int(backswing_start + best)
 
-    # Fallback 2: Find absolute minimum in segment, but only if it meets drop requirement
+    # Fallback 2: absolute minimum if it meets drop requirement
     if backswing_top is None:
         min_idx = int(np.argmin(segment))
         y_at_min = segment[min_idx]
         drop_from_start = y_at_start - y_at_min
-        
+
         if drop_from_start >= MIN_DROP_FROM_START:
             backswing_top = int(backswing_start + min_idx)
         else:
-            # No valid backswing detected - use start as fallback
             backswing_top = int(backswing_start)
             if debug:
                 print(f"WARNING: No backswing detected with drop >= {MIN_DROP_FROM_START}")
 
-    print(f"DEBUG: Backswing start = {backswing_start}")
-    print(f"DEBUG: Y at start = {y_at_start:.4f}")
-    print(f"DEBUG: Backswing top = {backswing_top}")
-    print(f"DEBUG: Y at top = {y[backswing_top]:.4f}")
-    print(f"DEBUG: Drop from start = {y_at_start - y[backswing_top]:.4f}")
+    if debug:
+        print(f"DEBUG: Backswing start = {backswing_start}")
+        print(f"DEBUG: Y at start = {y_at_start:.4f}")
+        print(f"DEBUG: Backswing top = {backswing_top}")
+        print(f"DEBUG: Y at top = {y[backswing_top]:.4f}")
+        print(f"DEBUG: Drop from start = {y_at_start - y[backswing_top]:.4f}")
     df["backswing_top_idx"] = int(backswing_top)
 
-
     # -----------------------------
-    # 4) Impact (WRIST → YOLO refine)
+    # 4) Impact (WRIST -> YOLO refine)
     # -----------------------------
     post = y[backswing_top: min(backswing_top + 120, n)]
     peaks, _ = find_peaks(post, prominence=0.12 * np.ptp(post))
@@ -368,33 +262,56 @@ def analyze_swing(df, fps=None, debug=False):
         club_y = df["clubhead_y_smooth"].values.astype(float)
         club_valid = df["clubhead_valid"].values.astype(int) if "clubhead_valid" in df.columns else None
         impact, impact_method = refine_impact_with_club_y(
-            impact_wrist, club_y, club_valid, window=5
+            impact_wrist, club_y, club_valid,
+            back_window=5, forward_window=12
         )
 
     df["impact_raw_idx"] = int(impact_wrist)
     df["impact_idx"] = int(impact)
     df["impact_method"] = impact_method
+
     # -----------------------------
-    # 4.5) Finish detection (ROM based)
+    # 4.5) Finish detection (ROM based)(Fix 6: improved fallback)
     # -----------------------------
     finish = n - 1
 
-    # Start searching a few frames after impact
     START_OFFSET = 6
-    WINDOW = 10           # frames to check stability
-    STABLE_RANGE = 0.05   # wrist Y must stay within this range
+    WINDOW = 10
+    STABLE_RANGE = 0.05
 
     start = min(impact + START_OFFSET, n - WINDOW - 1)
 
+    found_stable = False
     for i in range(start, n - WINDOW):
         seg = y[i:i + WINDOW]
-
-        # range of wrist Y in this window
         r = float(np.nanmax(seg) - np.nanmin(seg))
-
         if r < STABLE_RANGE:
             finish = i
+            found_stable = True
             break
+
+    # Fix 6: If no stable window found, try a relaxed threshold,
+    # then fall back to the point of minimum wrist speed after impact.
+    if not found_stable:
+        RELAXED_RANGE = 0.10
+        for i in range(start, n - WINDOW):
+            seg = y[i:i + WINDOW]
+            r = float(np.nanmax(seg) - np.nanmin(seg))
+            if r < RELAXED_RANGE:
+                finish = i
+                found_stable = True
+                break
+
+    if not found_stable:
+        # Use the frame with the lowest wrist speed after impact+offset
+        if "wrist_x_smooth" in df.columns:
+            wx = df["wrist_x_smooth"].values
+            wy = df["wrist_y_smooth"].values
+            speed = np.sqrt(np.diff(wx)**2 + np.diff(wy)**2)
+            search_start = min(impact + START_OFFSET, len(speed) - 1)
+            if search_start < len(speed):
+                finish = search_start + int(np.argmin(speed[search_start:]))
+        # else: keep finish = n - 1
 
     df["finish_idx"] = int(finish)
     df["follow_through_frames"] = int(max(finish - impact, 0))
@@ -439,11 +356,21 @@ def analyze_swing(df, fps=None, debug=False):
     df["max_speed_frame"] = int(max_v_frame)
     df["max_speed_frames_from_impact"] = int(frames_from_impact)
 
-    df["speed_timing_score"] = (
+    speed_timing_score = (
         100 if abs(frames_from_impact) <= 2 else
         85 if abs(frames_from_impact) <= 4 else
         70 if abs(frames_from_impact) <= 6 else
         50
+    )
+    df["speed_timing_score"] = speed_timing_score
+
+    # Fix 5: Add the text label that app.py references
+    df["speed_timing"] = (
+        "Excellent - peak speed at impact" if abs(frames_from_impact) <= 2 else
+        "Good - peak speed near impact" if abs(frames_from_impact) <= 4 else
+        "Moderate - peak speed slightly early" if frames_from_impact < -4 else
+        "Moderate - peak speed slightly late" if frames_from_impact > 4 else
+        "Needs work - peak speed far from impact"
     )
 
     # -----------------------------
