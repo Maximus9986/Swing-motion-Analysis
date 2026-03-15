@@ -1,68 +1,69 @@
 # 🏌️ Golf Swing Motion Analysis System
 
 A golf swing analysis application that uses computer vision and biomechanical heuristics to analyse golf swings from ordinary video.
-The system focuses on robust swing phase detection, tempo, and body mechanics (early extension) using 2D pose estimation, making it accessible to players without expensive launch monitors or motion-capture systems.
+The system combines MediaPipe 2D pose estimation with YOLOv8 club detection for robust swing phase detection, tempo analysis, and body mechanics evaluation, making it accessible to players without expensive launch monitors or motion-capture systems.
 
 ## 🎯 Features
 
-- **Pose Tracking**: Uses MediaPipe to extract 33-point pose landmarks from video
+- **Pose Tracking**: MediaPipe extracts pose landmarks from video, tracking wrist, elbow, shoulder, and hip joints
+- **Club Detection**: YOLOv8 custom-trained model detects the clubhead per frame, refining impact detection beyond wrist trajectory alone
+- **Handedness Support**: Supports both right-handed and left-handed golfers via a sidebar toggle, automatically tracking the correct lead arm
 - **Swing Phase Detection**: Automatically identifies address, backswing top, impact, and finish phases
 - **Tempo Analysis**: Measures backswing-to-downswing ratio (ideal ~3:1)
 - **Arm Extension Analysis**: Evaluates elbow angle at impact for proper extension
 - **Speed Timing**: Measures when maximum wrist speed occurs relative to impact
-- **Early Extension Detection**: Side-view proxy for hip drift/rise during the swing
-- **Visual Overlays**: Creates annotated videos with pose landmarks
-- **Phase Visualization**: Displays key swing positions with optional skeleton overlay
+- **Early Extension Detection**: Side-view proxy measuring normalised hip drift and rise during the swing
+- **Phase Visualisation**: Displays key swing positions with optional skeleton overlay
 - **Comprehensive Charts**: Wrist timeline, tempo breakdown, speed profiles, and score analysis
 
 ## 📁 Project Structure
 
 ```
-FYP/
+src/
 ├── app.py                  # Streamlit application
 ├── pose_tracking.py        # MediaPipe pose extraction
+├── club_tracking.py        # YOLOv8 clubhead detection + impact refinement
 ├── swing_analysis.py       # Swing phase + biomechanical analysis
 ├── visualisation.py        # Plots and charts
+├── models/
+│   └── best.pt             # Custom-trained YOLOv8 club detection model
 ├── requirements.txt
-├── README.md
-└── Data/
-    ├── overlay.mp4
-    ├── player_swing_analysis.csv
-    └── sample_videos/  
+└── README.md
+Data/
+├── player_swing_analysis.csv
+└── sample_videos/
+```
 
 ## 🚀 Installation
 
 ### Prerequisites
-- Python 3.8 or higher
+- Python 3.10 (Anaconda environment recommended)
 - pip package manager
-- Webcam or video file of golf swing
+- Video file of a golf swing (side/down-the-line view)
 
 ### Setup Steps
 
-1. **Clone or download the repository**
+1. **Clone the repository**
 ```bash
-   cd /path/to/FYP
+git clone https://github.com/Maximus9986/Swing-motion-Analysis.git
+cd Swing-motion-Analysis
 ```
 
-2. **Create a virtual environment (recommended)**
+2. **Create a conda environment (recommended)**
 ```bash
-   python -m venv venv
-   
-   # On Windows
-   venv\Scripts\activate
-   
-   # On Mac/Linux
-   source venv/bin/activate
+conda create -n FYP python=3.10
+conda activate FYP
 ```
 
 3. **Install dependencies**
 ```bash
-   pip install -r requirements.txt
+pip install -r requirements.txt
 ```
 
 4. **Run the application**
 ```bash
-   python -m streamlit run app.py
+cd src
+python -m streamlit run app.py
 ```
 
 5. **Open your browser**
@@ -73,46 +74,45 @@ FYP/
 
 ### Basic Usage
 
-1. **Upload Video**
-   - Click the file uploader
-   - Select an MP4 video of your golf swing
-   - Best results with side-view (facing or down-the-line) angle
+1. **Select Handedness**
+   - Use the sidebar radio button to select the golfer's dominant hand (right or left)
+   - This determines which arm is tracked as the lead arm
 
-2. **Analyze**
-   - Click "Analyze Swing" button
-   - Wait for pose extraction (may take 1-2 minutes)
-   - Review your results
+2. **Upload Video**
+   - Click the file uploader
+   - Select an MP4, MOV, or AVI video of your golf swing
+   - Best results with a down-the-line camera angle
 
 3. **View Results**
+   - Analysis runs automatically on upload
    - Overall score and rating displayed prominently
    - Phase frames show key positions in your swing
    - Detailed metrics for tempo, arm extension, speed timing, and early extension
-   - Interactive charts for deeper analysis
+   - Interactive charts across four tabs for deeper analysis
 
 4. **Download Results**
-   - Download analysis CSV with all metrics
+   - Download the analysis CSV with all metrics using the button at the bottom
 
 ### Video Recording Tips
 
 For best analysis results:
-- **Camera position**: Side view (90° to target line)
+- **Camera position**: Down-the-line (behind the golfer, along the target line)
 - **Distance**: Full body visible with some margin
 - **Lighting**: Good, even lighting
 - **Frame rate**: 30fps or higher
 - **Resolution**: 720p minimum, 1080p preferred
 - **Background**: Uncluttered, contrasting with golfer
-- **Duration**: Include full swing from setup to follow-through
-
+- **Duration**: Include a short address setup before swinging through to follow-through
 
 ## 📊 Metrics Explained
 
 ### Swing Phases
 | Phase | Description |
 |-------|-------------|
-| **Address** | Initial setup position (stable period before movement) |
-| **Top of Backswing** | Highest point of wrist during backswing (minimum Y value, requires >0.2 drop) |
-| **Impact** | Ball contact point (detected via wrist trajectory peak after downswing) |
-| **Finish** | End of follow-through (when wrist speed stabilizes) |
+| **Address** | Initial setup position (stable period before movement begins) |
+| **Top of Backswing** | Deepest trough in wrist Y trajectory (requires minimum 0.35 drop from backswing start to filter jitter) |
+| **Impact** | Ball contact point — wrist trajectory provides initial estimate, then YOLOv8 clubhead Y refines within an asymmetric window (5 frames back, 12 frames forward) to find the lowest clubhead position |
+| **Finish** | End of follow-through (detected when wrist Y stabilises within a 10-frame window, with relaxed threshold and minimum-speed fallbacks) |
 
 ### Tempo Ratio
 - **Definition**: Backswing frames ÷ Downswing frames
@@ -129,20 +129,20 @@ For best analysis results:
   - >155° = Excellent (fully extended)
   - 140–155° = Good (slight bend is normal)
   - 125–140° = Moderate
-  - <125° = Needs improvement (chicken wing)
+  - <125° = Needs improvement
 
 ### Speed Timing
 - **Metric**: Frame difference between max wrist speed and impact
-- **Ideal**: Max speed at or just before impact (±2 frames)
+- **Ideal**: Max speed at or just before impact (within 2 frames)
 - **Ratings**:
-  - ±2 frames = Excellent
-  - ±4 frames = Good
-  - ±6 frames = Moderate
-  - >6 frames = Early/Late release
+  - Within 2 frames = Excellent
+  - Within 4 frames = Good
+  - Within 6 frames = Moderate
+  - Beyond 6 frames = Needs work
 
 ### Early Extension
-- **Definition**: Hip movement toward the ball during downswing
-- **Metric**: Normalized hip drift (X) and rise (Y) from address to impact
+- **Definition**: Hip movement toward the ball during the downswing
+- **Metric**: Normalised hip drift (X) and rise (Y) from address to impact, using torso length as the reference scale
 - **Score**: 0–100 (lower is better)
 - **Ratings**:
   - 0–30 = Low risk (good)
@@ -150,7 +150,7 @@ For best analysis results:
   - 61–100 = High risk
 
 ### Overall Score
-Weighted combination of:
+Equal-weighted combination of four components (25 points each):
 - Tempo (25 points)
 - Arm Extension (25 points)
 - Speed Timing (25 points)
@@ -166,38 +166,53 @@ Weighted combination of:
 ## 🔬 Technical Details
 
 ### Pose Detection
-- Uses Google MediaPipe Pose
-- Extracts 33 landmarks per frame
-- Key joints tracked: wrists, elbows, shoulders, hips
-- Smoothing applied via Savitzky-Golay filter (window=7, polyorder=2)
+- Uses Google MediaPipe Pose with model complexity 2 (most accurate)
+- Tracks lead-arm joints: wrist, elbow, shoulder, and hip
+- Lead arm is automatically selected based on handedness (left side for right-handed golfers, right side for left-handed golfers)
+- Missing landmarks are interpolated linearly across frames
+- All joint trajectories smoothed via Savitzky-Golay filter (window=7, polyorder=2)
+
+### Club Detection
+- Custom-trained YOLOv8 pose model detects the clubhead in each frame
+- Uses keypoint Y coordinates when available, falls back to bounding box bottom edge
+- Smoothed with the same Savitzky-Golay filter as pose data
+- Provides per-frame `clubhead_y`, `clubhead_valid`, and `clubhead_y_smooth` values
 
 ### Phase Detection Algorithm
 
 1. **Address Detection**
-   - Finds stable segment early in video using rolling standard deviation
-   - Identifies period of minimal wrist movement
+   - Scans early frames for a stable wrist Y region
+   - Identifies the last quiet frame before consistent downward movement begins
 
 2. **Backswing Start**
-   - Detects first consistent downward movement from address
-   - Requires significant future drop (≥30% of total range or 0.2 minimum)
+   - Detects first frame where wrist Y drops below address level by a local threshold
+   - Validates that a significant future drop follows (minimum 0.2 absolute or percentage-based)
 
 3. **Top of Backswing**
-   - Finds troughs (local minima) in wrist Y trajectory
-   - **Requires minimum 0.2 drop from backswing start** to avoid jitter detection
-   - Validates with movement after the trough
+   - Finds troughs (local minima) in wrist Y using `scipy.signal.find_peaks` on the inverted signal
+   - Requires a minimum 0.35 drop from backswing start to avoid detecting jitter as a backswing
+   - Validates with a movement check after the trough (lookahead of 25 frames)
+   - Falls back to the deepest valid trough, then absolute minimum if needed
 
-4. **Impact Detection**
-   - Finds first peak in wrist Y after top of backswing
-   - Represents the point where wrist rises back up through the ball
+4. **Impact Detection (two-stage)**
+   - **Stage 1 (wrist)**: Finds the first peak in wrist Y after the top of backswing, representing the hands returning toward address height
+   - **Stage 2 (YOLO refinement)**: Searches an asymmetric window around the wrist estimate (5 frames back, 12 frames forward) for the frame with the lowest clubhead Y position. The forward bias accounts for the fact that the wrist peak typically fires a few frames before the club reaches the ball.
+   - Falls back to wrist-only if no valid YOLO detections exist in the window
 
 5. **Finish Detection**
-   - Monitors wrist speed after impact
-   - Finish when speed drops below 12% of peak for 12+ consecutive frames
+   - Searches for a 10-frame window where wrist Y range is below 0.05 (tight threshold)
+   - If not found, retries with a relaxed threshold of 0.10
+   - If still not found, falls back to the frame with minimum wrist speed after impact
+
+### Handedness
+- Selecting "left" or "right" changes which MediaPipe landmarks are extracted (right-side joints for left-handed golfers, left-side joints for right-handed golfers)
+- All downstream analysis runs identically regardless of handedness — the swing biomechanics are mirrored but the calculations are the same
 
 ### Data Processing
-- Savitzky-Golay smoothing for noise reduction
-- Forward/backward fill for missing data
-- Normalized metrics using torso length as reference
+- Savitzky-Golay smoothing for noise reduction on all joint and clubhead trajectories
+- Linear interpolation for missing pose detections
+- Forward/backward fill for remaining gaps
+- Normalised metrics using torso length (shoulder-to-hip distance) as reference
 
 ## 🐛 Troubleshooting
 
@@ -207,69 +222,62 @@ Weighted combination of:
 - Ensure full body is visible in frame
 - Improve lighting
 - Reduce background clutter
-- Try different camera angle
+- Try a different camera angle
 
 **"Video too short" error**
 - Video must be at least 30 frames (1 second at 30fps)
 - Include complete swing from setup to follow-through
 
-**Inaccurate swing path**
-- Ensure side view (not face-on)
-- Check that golfer doesn't step out of frame
+**Inaccurate phase detection**
+- Ensure camera is positioned down-the-line (behind the golfer)
+- Check that the golfer doesn't step out of frame
 - Verify good pose detection rate (>80%)
+- Ensure the correct handedness is selected in the sidebar
+
+**YOLO club tracking failed**
+- The app will fall back to wrist-only impact detection
+- Ensure the club is visible in the video
+- Good lighting and contrast help detection confidence
 
 **Slow processing**
-- Processing time ~1-2 minutes for typical video
-- Longer videos take more time
-- Close other applications to free resources
+- Processing time is typically 1–2 minutes depending on video length
+- YOLO inference is the most time-intensive step
+- Results are cached per video — reanalysis is instant unless the video or handedness changes
 
 ## 📚 Dependencies
 
 - **streamlit**: Web application framework
 - **mediapipe**: Pose estimation
+- **ultralytics**: YOLOv8 club detection
 - **opencv-python**: Video processing
 - **pandas**: Data manipulation
 - **numpy**: Numerical operations
-- **matplotlib**: Visualization
-- **scipy**: Statistical analysis
-
-## 🎓 Academic Context
-
-This is a final year project for Computer Science at the University of Birmingham. The system demonstrates:
-- Computer vision applications in sports analysis
-- Real-time pose estimation techniques
-- Biomechanical analysis algorithms
-- Signal processing for motion analysis
-- Interactive data visualization
-- Full-stack application development
+- **matplotlib**: Visualisation
+- **scipy**: Signal processing (Savitzky-Golay smoothing, peak detection)
+- **Pillow**: Image handling for phase frame display
 
 ## 🔮 Future Enhancements
 
 Potential improvements for future versions:
-- [ ] Club detection using GolfPose (HRNet + YOLOX) for more accurate impact detection
-- [ ] 3D pose estimation integration (CoMotion/SMPL)
+- [ ] 3D pose estimation integration 
 - [ ] Real-time webcam analysis
 - [ ] Multiple swing comparison
 - [ ] Hip/shoulder rotation analysis
-- [ ] Pro swing comparison using DTW
+- [ ] Pro swing comparison using Dynamic Time Warping
 - [ ] Mobile app version
 - [ ] Historical tracking database
 - [ ] PDF report generation
-## 📝 Code Quality Improvements
-
-## 📄 License
-
-This project is for academic purposes. Please cite if using for research or educational purposes.
 
 ## 👤 Author
 
 **Lim Maximus**
 - University of Birmingham
 - Computer Science Final Year Project
-- Year: 2025-2026
+- Year: 2025–2026
 
 ## 🙏 Acknowledgments
 
 - MediaPipe team at Google for pose estimation
+- Ultralytics for YOLOv8
 - Streamlit for the web framework
 - Golf instructors and biomechanics research
