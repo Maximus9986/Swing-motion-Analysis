@@ -20,7 +20,9 @@ from visualisation import (
 )
 
 # ✅ Windows path: use raw string
-CLUB_MODEL_PATH = r"C:\Users\User\FYP\Swing-motion-Analysis\src\models\best.pt"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+CLUB_MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
+
 # ----------------------------
 # Caching helpers
 # ----------------------------
@@ -30,13 +32,14 @@ def _file_hash(uploaded_file) -> str:
     return hashlib.md5(data).hexdigest()
 
 @st.cache_data(show_spinner=True)
-def run_pose(video_path: str):
-    """Run MediaPipe pose once per video."""
+def run_pose(video_path: str, handed: str = "right"):
+    """Run MediaPipe pose once per video + handedness combo."""
     pose_rows = extract_pose(
         video_path,
         output_path=None,
         write_overlay=False,
-        use_3d=False
+        use_3d=False,
+        handed=handed
     )
     return pd.DataFrame(pose_rows)
 
@@ -45,15 +48,6 @@ def run_analysis(df: pd.DataFrame, fps: float):
     """Run swing analysis once per pose dataframe."""
     return analyze_swing(df, fps=fps, debug=False)
 
-@st.cache_data(show_spinner=False)
-def run_yolo_window(video_path: str, model_path: str, impact_frame: int, window: int = 3, conf: float = 0.25):
-    """
-    Run YOLO only on impact ±window frames and return a small DF.
-    NOTE: This assumes you modified extract_clubhead_y_from_yolo to accept impact_frame+window,
-    OR you make a new function for windowed inference.
-    """
-    # If your extract_clubhead_y_from_yolo still processes full video, don't use this yet.
-    return extract_clubhead_y_from_yolo(video_path, model_path, conf=conf)  # placeholder
 
 # ----------------------------
 # Frame extraction helpers
@@ -162,22 +156,33 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 uploaded = st.file_uploader("Upload your swing video (MP4)", type=["mp4", "mov", "avi"])
 
+# Fix 3: Handedness toggle in sidebar
+handed = st.sidebar.radio(
+    "Golfer handedness",
+    options=["right", "left"],
+    index=0,
+    help="Select the golfer's dominant hand. This determines which arm is tracked as the lead arm."
+)
+
 if uploaded:
     video_key = _file_hash(uploaded)
 
-    # Reset stored results if a different video is uploaded
-    if st.session_state.get("video_key") != video_key:
+    # Reset stored results if a different video OR handedness is selected
+    cache_key = f"{video_key}_{handed}"
+    if st.session_state.get("cache_key") != cache_key:
+        st.session_state.cache_key = cache_key
         st.session_state.video_key = video_key
         st.session_state.analysis_df = None
         st.session_state.pose_df = None
         st.session_state.club_df = None
 
     # Save uploaded video ONCE per new upload
-    if "player_video_path" not in st.session_state or st.session_state.get("video_key") != video_key:
+    if "player_video_path" not in st.session_state or st.session_state.get("player_video_key") != video_key:
         tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
         tfile.write(uploaded.getvalue())
         tfile.flush()
         st.session_state.player_video_path = tfile.name
+        st.session_state.player_video_key = video_key
 
     player_video_path = st.session_state.player_video_path
 
@@ -186,16 +191,14 @@ if uploaded:
 
     st.info("⏳ Analyzing swing... this may take a moment")
 
-    # 2) Pose extraction ONCE
-    overlay_path = os.path.join(DATA_DIR, "overlay.mp4")
     # Get FPS once
     cap = cv2.VideoCapture(player_video_path)
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     cap.release()
 
-    # Pose extraction (cached)
+    # Pose extraction (cached by video + handedness)
     if st.session_state.pose_df is None:
-        st.session_state.pose_df = run_pose(player_video_path)
+        st.session_state.pose_df = run_pose(player_video_path, handed=handed)
 
     df = st.session_state.pose_df.copy()
     if "frame" not in df.columns:
@@ -314,7 +317,7 @@ if uploaded:
         st.metric("Finish", f"Frame {gi('finish_idx')}")
 
     st.markdown("---")
-    
+
     # ----------------------------
     # Metrics
     # ----------------------------
@@ -359,7 +362,6 @@ if uploaded:
 
     st.markdown("---")
 
-
     # ----------------------------
     # Plots
     # ----------------------------
@@ -388,10 +390,11 @@ else:
     st.info("👆 Upload a swing video to get started.")
     st.markdown("""
 ### How it works:
-1. Upload a side-view video of your golf swing (right-handed golfer, camera on right side)
-2. The app extracts pose landmarks (MediaPipe)
-3. Key swing phases are detected automatically
-4. You get metrics: tempo, arm extension, speed timing, and early extension risk
+1. Upload a side-view video of your golf swing
+2. Select your handedness in the sidebar (right or left-handed)
+3. The app extracts pose landmarks (MediaPipe)
+4. Key swing phases are detected automatically
+5. You get metrics: tempo, arm extension, speed timing, and early extension risk
 
 ### Tips for best results:
 - Keep the camera fixed (tripod if possible)
