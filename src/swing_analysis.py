@@ -278,7 +278,7 @@ def analyze_swing(df, fps=None, debug=False):
     df["impact_method"] = impact_method
 
     # -----------------------------
-    # 4.5) Finish detection (ROM based)(Fix 6: improved fallback)
+    # 4.5) Finish detection (ROM based)
     # -----------------------------
     finish = n - 1
 
