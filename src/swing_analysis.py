@@ -145,35 +145,10 @@ def analyze_swing(df, fps=None, debug=False):
     n = len(y)
 
     # -----------------------------
-    # 2) Address + backswing start
+    # 2) Find backswing top FIRST
     # -----------------------------
-    def detect_address_and_backswing_start(yvals):
-        n_ = len(yvals)
-        if n_ < 30:
-            return 0, 0
-
-        total_range = np.nanpercentile(yvals, 95) - np.nanpercentile(yvals, 5)
-        total_range = max(total_range, 1e-6)
-
-        MIN_DROP = 0.2
-        local_drop = 0.02 * total_range
-
-        address = 0
-        for i in range(20, min(200, n_ - 40)):
-            if yvals[i] < yvals[address] - local_drop:
-                if yvals[address] - np.nanmin(yvals[i:i + 40]) >= MIN_DROP:
-                    return address, max(0, i - 5)
-        return 0, 0
-
-    address_idx, backswing_start = detect_address_and_backswing_start(y)
-    df["address_idx"] = int(address_idx)
-    df["backswing_start_idx"] = int(backswing_start)
-
-    # -----------------------------
-    # 3) Top of backswing
-    # -----------------------------
-    search_window = min(n - backswing_start - 1, 500)
-    segment = y[backswing_start : backswing_start + search_window]
+    search_window = min(n - 1, 500)
+    segment = y[0 : search_window]
 
     seg_range = float(np.max(segment) - np.min(segment))
     prom = 0.15 * max(seg_range, 1e-6)
@@ -184,65 +159,97 @@ def analyze_swing(df, fps=None, debug=False):
         distance=8
     )
 
-    MIN_DROP_FROM_START = 0.35
+    MIN_DROP_ABS = 0.35
     LOOKAHEAD = 25
 
-    y_at_start = y[backswing_start]
-
     backswing_top = None
+    # Use the median of the first quarter of the search window as the baseline.
+    baseline_end = max(10, search_window // 4)
+    baseline_y = float(np.nanmedian(y[0:baseline_end]))
 
     if len(troughs) > 0:
         for t in troughs:
-            trough_idx = backswing_start + t
-            y_at_trough = y[trough_idx]
+            y_at_trough = y[t]
+            drop_from_baseline = baseline_y - y_at_trough
 
-            drop_from_start = y_at_start - y_at_trough
-
-            if drop_from_start < MIN_DROP_FROM_START:
+            if drop_from_baseline < MIN_DROP_ABS:
                 continue
 
             j = min(t + LOOKAHEAD, len(segment) - 1)
             move_after = float(np.max(segment[t:j+1]) - np.min(segment[t:j+1]))
 
             if move_after >= 0.1:
-                backswing_top = int(trough_idx)
+                backswing_top = int(t)
                 break
 
     # Fallback 1: deepest valid trough
     if backswing_top is None and len(troughs) > 0:
         valid_troughs = []
         for t in troughs:
-            trough_idx = backswing_start + t
-            y_at_trough = y[trough_idx]
-            drop_from_start = y_at_start - y_at_trough
-
-            if drop_from_start >= MIN_DROP_FROM_START:
+            y_at_trough = y[t]
+            drop_from_baseline = baseline_y - y_at_trough
+            if drop_from_baseline >= MIN_DROP_ABS:
                 valid_troughs.append(t)
 
         if valid_troughs:
             best = int(valid_troughs[np.argmin([segment[t] for t in valid_troughs])])
-            backswing_top = int(backswing_start + best)
+            backswing_top = int(best)
 
     # Fallback 2: absolute minimum if it meets drop requirement
     if backswing_top is None:
         min_idx = int(np.argmin(segment))
         y_at_min = segment[min_idx]
-        drop_from_start = y_at_start - y_at_min
+        drop_from_baseline = baseline_y - y_at_min
 
-        if drop_from_start >= MIN_DROP_FROM_START:
-            backswing_top = int(backswing_start + min_idx)
+        if drop_from_baseline >= MIN_DROP_ABS:
+            backswing_top = int(min_idx)
         else:
-            backswing_top = int(backswing_start)
+            backswing_top = 0
             if debug:
-                print(f"WARNING: No backswing detected with drop >= {MIN_DROP_FROM_START}")
+                print(f"WARNING: No backswing detected with drop >= {MIN_DROP_ABS}")
+
+    df["backswing_top_idx"] = int(backswing_top)
+
+    # -----------------------------
+    # 3) Address + backswing start
+    # -----------------------------
+    STABLE_WINDOW = 8        # frames to check for flatness
+    STABLE_THRESH = 0.04     # max wrist Y range to count as "quiet"
+    DROP_RATE_THRESH = 0.008 # per-frame drop rate that signals the swing has started
+    ADDRESS_OFFSET = 5       # address is this many frames before backswing start
+
+    address_idx = 0
+    backswing_start = max(backswing_top - 1, 0)
+
+    for i in range(backswing_top - 1, STABLE_WINDOW, -1):
+        dy = y[i] - y[i + 1] 
+
+        if dy < DROP_RATE_THRESH:
+            win = y[max(0, i - STABLE_WINDOW):i + 1]
+            win_range = float(np.nanmax(win) - np.nanmin(win))
+
+            if win_range < STABLE_THRESH:
+                backswing_start = int(i + 1)
+                address_idx = int(max(0, backswing_start - ADDRESS_OFFSET))
+                break
+    else:
+        # If we walked all the way back without finding a quiet region,
+        # use a simple heuristic: find the frame with max Y before the top
+        pre_top = y[0:backswing_top]
+        if len(pre_top) > 0:
+            backswing_start = int(np.argmax(pre_top)) + 1
+            address_idx = int(max(0, backswing_start - ADDRESS_OFFSET))
+
+    df["address_idx"] = int(address_idx)
+    df["backswing_start_idx"] = int(backswing_start)
 
     if debug:
-        print(f"DEBUG: Backswing start = {backswing_start}")
-        print(f"DEBUG: Y at start = {y_at_start:.4f}")
         print(f"DEBUG: Backswing top = {backswing_top}")
         print(f"DEBUG: Y at top = {y[backswing_top]:.4f}")
-        print(f"DEBUG: Drop from start = {y_at_start - y[backswing_top]:.4f}")
-    df["backswing_top_idx"] = int(backswing_top)
+        print(f"DEBUG: Address = {address_idx}")
+        print(f"DEBUG: Y at address = {y[address_idx]:.4f}")
+        print(f"DEBUG: Backswing start = {backswing_start}")
+        print(f"DEBUG: Drop from address = {y[address_idx] - y[backswing_top]:.4f}")
 
     # -----------------------------
     # 4) Impact (WRIST -> YOLO refine)
