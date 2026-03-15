@@ -6,6 +6,7 @@ import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
+import hashlib
 from PIL import Image
 
 from pose_tracking import extract_pose
@@ -20,6 +21,39 @@ from visualisation import (
 
 # ✅ Windows path: use raw string
 CLUB_MODEL_PATH = r"C:\Users\User\FYP\Swing-motion-Analysis\src\models\best.pt"
+# ----------------------------
+# Caching helpers
+# ----------------------------
+def _file_hash(uploaded_file) -> str:
+    """Stable key so Streamlit cache/session resets when a new file is uploaded."""
+    data = uploaded_file.getvalue()
+    return hashlib.md5(data).hexdigest()
+
+@st.cache_data(show_spinner=True)
+def run_pose(video_path: str):
+    """Run MediaPipe pose once per video."""
+    pose_rows = extract_pose(
+        video_path,
+        output_path=None,
+        write_overlay=False,
+        use_3d=False
+    )
+    return pd.DataFrame(pose_rows)
+
+@st.cache_data(show_spinner=False)
+def run_analysis(df: pd.DataFrame, fps: float):
+    """Run swing analysis once per pose dataframe."""
+    return analyze_swing(df, fps=fps, debug=False)
+
+@st.cache_data(show_spinner=False)
+def run_yolo_window(video_path: str, model_path: str, impact_frame: int, window: int = 3, conf: float = 0.25):
+    """
+    Run YOLO only on impact ±window frames and return a small DF.
+    NOTE: This assumes you modified extract_clubhead_y_from_yolo to accept impact_frame+window,
+    OR you make a new function for windowed inference.
+    """
+    # If your extract_clubhead_y_from_yolo still processes full video, don't use this yet.
+    return extract_clubhead_y_from_yolo(video_path, model_path, conf=conf)  # placeholder
 
 # ----------------------------
 # Frame extraction helpers
@@ -129,11 +163,23 @@ os.makedirs(DATA_DIR, exist_ok=True)
 uploaded = st.file_uploader("Upload your swing video (MP4)", type=["mp4", "mov", "avi"])
 
 if uploaded:
-    # 1) Save uploaded video ONCE
-    tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    tfile.write(uploaded.read())
-    tfile.flush()
-    player_video_path = tfile.name
+    video_key = _file_hash(uploaded)
+
+    # Reset stored results if a different video is uploaded
+    if st.session_state.get("video_key") != video_key:
+        st.session_state.video_key = video_key
+        st.session_state.analysis_df = None
+        st.session_state.pose_df = None
+        st.session_state.club_df = None
+
+    # Save uploaded video ONCE per new upload
+    if "player_video_path" not in st.session_state or st.session_state.get("video_key") != video_key:
+        tfile = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+        tfile.write(uploaded.getvalue())
+        tfile.flush()
+        st.session_state.player_video_path = tfile.name
+
+    player_video_path = st.session_state.player_video_path
 
     st.subheader("📹 Uploaded Video")
     st.video(player_video_path)
@@ -142,44 +188,46 @@ if uploaded:
 
     # 2) Pose extraction ONCE
     overlay_path = os.path.join(DATA_DIR, "overlay.mp4")
-    pose_rows = extract_pose(
-        player_video_path,
-        output_path=overlay_path,
-        write_overlay=True,
-        use_3d=False
-    )
+    # Get FPS once
+    cap = cv2.VideoCapture(player_video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.release()
 
-    if not pose_rows:
-        st.error("Pose extraction failed or video could not be opened.")
-        st.stop()
+    # Pose extraction (cached)
+    if st.session_state.pose_df is None:
+        st.session_state.pose_df = run_pose(player_video_path)
 
-    df = pd.DataFrame(pose_rows)
-
-    # Ensure frame index exists (needed for merge)
+    df = st.session_state.pose_df.copy()
     if "frame" not in df.columns:
         df["frame"] = np.arange(len(df))
 
-    # 3) YOLO club tracking ONCE
-    try:
-        club_df = extract_clubhead_y_from_yolo(
-            player_video_path,
-            CLUB_MODEL_PATH,
-            conf=0.25,
-            clubhead_kpt_idx=0
-        )
+    # YOLO (cached via session_state)
+    if st.session_state.club_df is None:
+        try:
+            st.session_state.club_df = extract_clubhead_y_from_yolo(
+                player_video_path,
+                CLUB_MODEL_PATH,
+                conf=0.25,
+                clubhead_kpt_idx=0
+            )
+        except Exception as e:
+            st.session_state.club_df = None
+            st.warning(f"YOLO club tracking failed (wrist-only impact). Error: {e}")
 
+    if st.session_state.club_df is not None:
+        club_df = st.session_state.club_df
         df = df.merge(
             club_df[["frame", "clubhead_y", "clubhead_valid", "clubhead_y_smooth"]],
             on="frame",
             how="left"
         )
-
         st.caption(f"YOLO detections: {int(df['clubhead_valid'].sum())}/{len(df)} frames")
-    except Exception as e:
-        st.warning(f"YOLO club tracking failed (wrist-only impact). Error: {e}")
 
-    # 4) Analyze ONCE (impact refinement happens inside analyze_swing)
-    df = analyze_swing(df, debug=False)
+    # Analysis (cached)
+    if st.session_state.analysis_df is None:
+        st.session_state.analysis_df = run_analysis(df, fps)
+
+    df = st.session_state.analysis_df.copy()
 
     # Show whether YOLO was used
     if "impact_method" in df.columns:
@@ -266,6 +314,51 @@ if uploaded:
         st.metric("Finish", f"Frame {gi('finish_idx')}")
 
     st.markdown("---")
+    
+    # ----------------------------
+    # Metrics
+    # ----------------------------
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.subheader("⏱️ Tempo")
+        tempo_ratio = df["tempo_ratio"].iloc[0] if "tempo_ratio" in df.columns else None
+        st.metric("Tempo Ratio", f"{tempo_ratio}:1" if tempo_ratio is not None else "N/A")
+        st.write(f"Backswing: {gi('backswing_frames')} frames")
+        st.write(f"Downswing: {gi('downswing_frames')} frames")
+
+        if tempo_ratio is not None:
+            if 2.0 <= float(tempo_ratio) <= 3.5:
+                st.success("✅ Good tempo (tour average is ~3:1)")
+            elif float(tempo_ratio) < 2.0:
+                st.warning("⚠️ Quick backswing - try slowing down")
+            else:
+                st.warning("⚠️ Slow downswing - try accelerating")
+
+        st.subheader("🏋️ Early Extension (Side-view proxy)")
+        if "early_extension_score" in df.columns:
+            st.metric("Early Extension Score", f"{gi('early_extension_score')}/100")
+            st.write(f"Assessment: **{df['early_extension_label'].iloc[0]}**")
+        else:
+            st.write("N/A")
+
+    with c2:
+        st.subheader("💪 Arm Extension")
+        if "elbow_angle_impact" in df.columns and pd.notna(df["elbow_angle_impact"].iloc[0]):
+            st.metric("Elbow Angle at Impact", f"{float(df['elbow_angle_impact'].iloc[0]):.1f}°")
+            st.write(f"Classification: **{df['arm_extension_label'].iloc[0]}**")
+        else:
+            st.write("Data not available")
+
+        st.subheader("⚡ Speed Timing")
+        if "max_speed_frame" in df.columns:
+            st.write(f"Max Speed Frame: {gi('max_speed_frame')}")
+        st.write(f"Impact Frame: {gi('impact_idx')}")
+        if "speed_timing" in df.columns:
+            st.write(f"Assessment: **{df['speed_timing'].iloc[0]}**")
+
+    st.markdown("---")
+
 
     # ----------------------------
     # Plots
@@ -293,3 +386,16 @@ if uploaded:
 
 else:
     st.info("👆 Upload a swing video to get started.")
+    st.markdown("""
+### How it works:
+1. Upload a side-view video of your golf swing (right-handed golfer, camera on right side)
+2. The app extracts pose landmarks (MediaPipe)
+3. Key swing phases are detected automatically
+4. You get metrics: tempo, arm extension, speed timing, and early extension risk
+
+### Tips for best results:
+- Keep the camera fixed (tripod if possible)
+- Ensure full body is visible throughout the swing
+- Good lighting helps pose tracking
+- Include a short address setup before swinging
+""")
