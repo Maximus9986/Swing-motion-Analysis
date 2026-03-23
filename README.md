@@ -179,27 +179,28 @@ Equal-weighted combination of four components (25 points each):
 - Provides per-frame `clubhead_y`, `clubhead_valid`, and `clubhead_y_smooth` values
 
 ### Phase Detection Algorithm
+Phase detection follows a top-down strategy: the backswing top is found first, then the address is located by walking backwards from that anchor point.
 
-1. **Address Detection**
-   - Scans early frames for a stable wrist Y region
-   - Identifies the last quiet frame before consistent downward movement begins
+1. **Top of Backswing (found first)**
+   - Searches the first 500 frames of smoothed wrist Y for the major trough
+   - A baseline wrist height is established from the median of the first quarter of the search window
+   - Candidate troughs detected using scipy.signal.find_peaks on the inverted signal, accepted only if the wrist has descended by at least 0.35 units below the baseline
+   - Each candidate validated by checking that significant movement follows within a 25-frame lookahead
+   - Falls back to the deepest valid trough, then the absolute minimum if needed
 
-2. **Backswing Start**
-   - Detects first frame where wrist Y drops below address level by a local threshold
-   - Validates that a significant future drop follows (minimum 0.2 absolute or percentage-based)
+2. **Address and Backswing Start (found by walking backwards from top)**
+   - Starting from the backswing top, walks backwards frame by frame
+   - At each frame, checks two conditions: (1) per-frame wrist Y drop rate below 0.008, and (2) preceding 8-frame window has wrist Y range below 0.04
+   - The first frame satisfying both conditions is taken as the backswing start
+   - Address is placed 5 frames before the backswing start, capturing a settled setup position
+   - This top-down approach prevents videos with extended pre-swing footage (waggles, practice swings) from detecting address at frame 0
 
-3. **Top of Backswing**
-   - Finds troughs (local minima) in wrist Y using `scipy.signal.find_peaks` on the inverted signal
-   - Requires a minimum 0.35 drop from backswing start to avoid detecting jitter as a backswing
-   - Validates with a movement check after the trough (lookahead of 25 frames)
-   - Falls back to the deepest valid trough, then absolute minimum if needed
-
-4. **Impact Detection (two-stage)**
-   - **Stage 1 (wrist)**: Finds the first peak in wrist Y after the top of backswing, representing the hands returning toward address height
+3. **Impact Detection (two-stage)**
+   - **Stage 1 (wrist)**: Finds the first peak in wrist Y after the top of backswing, within a 120-frame search window
    - **Stage 2 (YOLO refinement)**: Searches an asymmetric window around the wrist estimate (5 frames back, 12 frames forward) for the frame with the lowest clubhead Y position. The forward bias accounts for the fact that the wrist peak typically fires a few frames before the club reaches the ball.
    - Falls back to wrist-only if no valid YOLO detections exist in the window
 
-5. **Finish Detection**
+4. **Finish Detection**
    - Searches for a 10-frame window where wrist Y range is below 0.05 (tight threshold)
    - If not found, retries with a relaxed threshold of 0.10
    - If still not found, falls back to the frame with minimum wrist speed after impact
@@ -229,7 +230,7 @@ Equal-weighted combination of four components (25 points each):
 - Include complete swing from setup to follow-through
 
 **Inaccurate phase detection**
-- Ensure camera is positioned down-the-line (behind the golfer)
+- Ensure camera is positioned down-the-line (beside the golfer)
 - Check that the golfer doesn't step out of frame
 - Verify good pose detection rate (>80%)
 - Ensure the correct handedness is selected in the sidebar
