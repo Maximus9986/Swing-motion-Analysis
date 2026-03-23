@@ -19,19 +19,27 @@ The system combines MediaPipe 2D pose estimation with YOLOv8 club detection for 
 ## 📁 Project Structure
 
 ```
-src/
-├── app.py                  # Streamlit application
-├── pose_tracking.py        # MediaPipe pose extraction
-├── club_tracking.py        # YOLOv8 clubhead detection + impact refinement
-├── swing_analysis.py       # Swing phase + biomechanical analysis
-├── visualisation.py        # Plots and charts
-├── models/
-│   └── best.pt             # Custom-trained YOLOv8 club detection model
+Swing-motion-Analysis/
+├── README.md
 ├── requirements.txt
-└── README.md
-Data/
-├── player_swing_analysis.csv
-└── sample_videos/
+├── Dockerfile
+├── .gitignore
+├── .dockerignore
+├── check_environment.py
+├── commotion.ipynb              # CoMotion 3D pose experiments (Kaggle)
+├── golfdb-ground-truth.ipynb    # GolfDB SwingNet validation (Kaggle)
+├── yolo-model.ipynb             # YOLO club detection training (Kaggle)
+│
+├── Data/                        # Sample golf swing videos
+│
+└── src/                         # Core application code
+    ├── app.py                   # Streamlit web interface
+    ├── pose_tracking.py         # MediaPipe pose extraction
+    ├── club_tracking.py         # YOLOv8 clubhead detection + impact refinement
+    ├── swing_analysis.py        # Phase detection & biomechanical metrics
+    ├── visualisation.py         # Matplotlib plots and charts
+    └── models/
+        └── best.pt              # Custom-trained YOLOv8 club detection model
 ```
 
 ## 🚀 Installation
@@ -96,7 +104,7 @@ python -m streamlit run app.py
 ### Video Recording Tips
 
 For best analysis results:
-- **Camera position**: Down-the-line (behind the golfer, along the target line)
+- - **Camera position**: Down-the-line (side view, perpendicular to the target line, with the golfer's full body visible in profile)
 - **Distance**: Full body visible with some margin
 - **Lighting**: Good, even lighting
 - **Frame rate**: 30fps or higher
@@ -109,8 +117,8 @@ For best analysis results:
 ### Swing Phases
 | Phase | Description |
 |-------|-------------|
-| **Address** | Initial setup position (stable period before movement begins) |
-| **Top of Backswing** | Deepest trough in wrist Y trajectory (requires minimum 0.35 drop from backswing start to filter jitter) |
+| **Address** | Setup position, detected by walking backwards from the backswing top to find the last quiet frame, then offset 5 frames earlier |
+| **Top of Backswing** | Deepest trough in wrist Y trajectory (requires minimum 0.35 drop from baseline median to filter jitter), found first as the anchor point |
 | **Impact** | Ball contact point — wrist trajectory provides initial estimate, then YOLOv8 clubhead Y refines within an asymmetric window (5 frames back, 12 frames forward) to find the lowest clubhead position |
 | **Finish** | End of follow-through (detected when wrist Y stabilises within a 10-frame window, with relaxed threshold and minimum-speed fallbacks) |
 
@@ -230,7 +238,7 @@ Phase detection follows a top-down strategy: the backswing top is found first, t
 - Include complete swing from setup to follow-through
 
 **Inaccurate phase detection**
-- Ensure camera is positioned down-the-line (beside the golfer)
+- - Ensure camera is positioned down-the-line (side view, perpendicular to the target line)
 - Check that the golfer doesn't step out of frame
 - Verify good pose detection rate (>80%)
 - Ensure the correct handedness is selected in the sidebar
