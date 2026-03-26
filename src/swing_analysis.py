@@ -2,7 +2,6 @@ import numpy as np
 import pandas as pd
 from scipy.signal import find_peaks
 
-# Fix 1: Import shared helpers from club_tracking (single source of truth)
 from club_tracking import _safe_savgol, refine_impact_with_club_y
 
 
@@ -297,7 +296,7 @@ def analyze_swing(df, fps=None, debug=False):
             found_stable = True
             break
 
-    # Fix 6: If no stable window found, try a relaxed threshold,
+    #If no stable window found, try a relaxed threshold,
     # then fall back to the point of minimum wrist speed after impact.
     if not found_stable:
         RELAXED_RANGE = 0.10
@@ -370,8 +369,6 @@ def analyze_swing(df, fps=None, debug=False):
         50
     )
     df["speed_timing_score"] = speed_timing_score
-
-    # Fix 5: Add the text label that app.py references
     df["speed_timing"] = (
         "Excellent - peak speed at impact" if abs(frames_from_impact) <= 2 else
         "Good - peak speed near impact" if abs(frames_from_impact) <= 4 else

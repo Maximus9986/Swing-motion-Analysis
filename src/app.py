@@ -19,7 +19,6 @@ from visualisation import (
     plot_overall_score
 )
 
-# ✅ Windows path: use raw string
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CLUB_MODEL_PATH = os.path.join(BASE_DIR, "models", "best.pt")
 
@@ -156,7 +155,7 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 uploaded = st.file_uploader("Upload your swing video (MP4)", type=["mp4", "mov", "avi"])
 
-# Fix 3: Handedness toggle in sidebar
+#Handedness toggle in sidebar
 handed = st.sidebar.radio(
     "Golfer handedness",
     options=["right", "left"],
