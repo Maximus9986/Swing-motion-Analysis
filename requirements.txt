@@ -6,3 +6,4 @@ scipy==1.11.4
 matplotlib==3.8.2
 streamlit==1.29.0
 plotly==5.18.0
+ultralytics==8.4.15
