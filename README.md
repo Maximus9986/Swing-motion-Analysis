@@ -104,7 +104,7 @@ python -m streamlit run app.py
 ### Video Recording Tips
 
 For best analysis results:
-- - **Camera position**: Down-the-line (side view, perpendicular to the target line, with the golfer's full body visible in profile)
+- **Camera position**: Down-the-line (side view, perpendicular to the target line, with the golfer's full body visible in profile)
 - **Distance**: Full body visible with some margin
 - **Lighting**: Good, even lighting
 - **Frame rate**: 30fps or higher
@@ -238,7 +238,7 @@ Phase detection follows a top-down strategy: the backswing top is found first, t
 - Include complete swing from setup to follow-through
 
 **Inaccurate phase detection**
-- - Ensure camera is positioned down-the-line (side view, perpendicular to the target line)
+- Ensure camera is positioned down-the-line (side view, perpendicular to the target line)
 - Check that the golfer doesn't step out of frame
 - Verify good pose detection rate (>80%)
 - Ensure the correct handedness is selected in the sidebar
